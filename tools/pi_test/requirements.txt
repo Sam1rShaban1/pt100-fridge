@@ -1,0 +1,3 @@
+paho-mqtt>=2
+adafruit-circuitpython-max31865
+spidev

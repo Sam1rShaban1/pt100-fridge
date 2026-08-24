@@ -1,0 +1,19 @@
+# Local testing override (no domain / no public TLS).
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.local.yml up -d
+# Then reach:
+#   Grafana    http://<pi-ip>:3000
+#   OTA server http://<pi-ip>:8000
+# Caddy (public TLS / Let's Encrypt) is disabled here because it needs a
+# public domain + ports 80/443.
+services:
+  caddy:
+    profiles: ["disabled"]
+
+  grafana:
+    ports:
+      - "3000:3000"
+
+  ota-server:
+    ports:
+      - "8000:8000"
