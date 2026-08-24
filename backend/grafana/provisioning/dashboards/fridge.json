@@ -1,0 +1,66 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "Fridge temperatures",
+      "datasource": { "type": "influxdb", "uid": "pt100-influxdb" },
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "measurement": "pt100",
+          "refId": "A",
+          "rawQuery": true,
+          "query": "SELECT mean(\"temp\") FROM \"pt100\" WHERE \"sensor_id\"='$sensor' AND $timeFilter GROUP BY time($__interval) fill(null)"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "celsius",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "blue", "value": null },
+              { "color": "green", "value": 0 },
+              { "color": "red", "value": 10 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Sensor fault flags",
+      "datasource": { "type": "influxdb", "uid": "pt100-influxdb" },
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 9 },
+      "targets": [
+        {
+          "measurement": "pt100",
+          "refId": "B",
+          "rawQuery": true,
+          "query": "SELECT mean(\"fault\") FROM \"pt100\" WHERE \"sensor_id\"='$sensor' AND $timeFilter GROUP BY time($__interval) fill(null)"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["pt100", "fridge"],
+  "templating": {
+    "list": [
+      {
+        "name": "sensor",
+        "type": "query",
+        "refresh": 2,
+        "datasource": { "type": "influxdb", "uid": "pt100-influxdb" },
+        "query": "SHOW TAG VALUES FROM \"pt100\" WITH KEY = \"sensor_id\""
+      }
+    ]
+  },
+  "time": { "from": "now-6h", "to": "now" },
+  "title": "PT100 Fridge",
+  "uid": "pt100-fridge",
+  "version": 1
+}

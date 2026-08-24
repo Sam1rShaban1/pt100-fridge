@@ -1,0 +1,11 @@
+{
+  email admin@{$DOMAIN}
+}
+
+grafana.{$DOMAIN} {
+  reverse_proxy grafana:3000
+}
+
+ota.{$DOMAIN} {
+  reverse_proxy ota-server:8000
+}

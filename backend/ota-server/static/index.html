@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>PT100 Fridge &mdash; OTA</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem; }
+    h1 { font-size: 1.4rem; }
+    fieldset { margin-bottom: 1.2rem; }
+    label { display: block; margin: 0.4rem 0 0.2rem; font-weight: 600; }
+    input, button { padding: 0.4rem; width: 100%; box-sizing: border-box; }
+    pre { background: #f4f4f4; padding: 0.6rem; overflow: auto; }
+    .ok { color: #146; }
+    .err { color: #a11; }
+  </style>
+</head>
+<body>
+  <h1>PT100 Fridge &mdash; Firmware OTA</h1>
+
+  <fieldset>
+    <legend>1. Upload firmware (.bin)</legend>
+    <label>Group</label>
+    <input id="group" value="zone_a" />
+    <label>Version (e.g. 1.1.0; blank = filename)</label>
+    <input id="version" placeholder="1.1.0" />
+    <label>File</label>
+    <input id="file" type="file" accept=".bin" />
+    <label>Admin token</label>
+    <input id="token" type="password" placeholder="OTA_ADMIN_TOKEN" />
+    <p><button id="uploadBtn">Upload</button></p>
+    <pre id="uploadOut"></pre>
+  </fieldset>
+
+  <fieldset>
+    <legend>2. Start staged rollout</legend>
+    <label>Group</label>
+    <input id="rgroup" value="zone_a" />
+    <label>Version</label>
+    <input id="rversion" placeholder="1.1.0" />
+    <label>Canary size (devices updated first)</label>
+    <input id="canary" type="number" value="1" min="1" />
+    <p><button id="rolloutBtn">Roll out</button></p>
+    <pre id="rolloutOut"></pre>
+  </fieldset>
+
+  <fieldset>
+    <legend>Status</legend>
+    <p><button id="statusBtn">Refresh rollout + devices</button></p>
+    <pre id="statusOut"></pre>
+  </fieldset>
+
+  <script>
+    const token = () => document.getElementById("token").value;
+    const headers = () => ({ Authorization: "Bearer " + token() });
+
+    async function upload() {
+      const fd = new FormData();
+      fd.append("group", document.getElementById("group").value);
+      fd.append("version", document.getElementById("version").value);
+      fd.append("file", document.getElementById("file").files[0]);
+      const r = await fetch("/api/firmware", { method: "POST", body: fd, headers: headers() });
+      const out = document.getElementById("uploadOut");
+      out.textContent = JSON.stringify(await r.json(), null, 2);
+      out.className = r.ok ? "ok" : "err";
+    }
+
+    async function rollout() {
+      const body = {
+        group: document.getElementById("rgroup").value,
+        version: document.getElementById("rversion").value,
+        canary: parseInt(document.getElementById("canary").value, 10),
+      };
+      const r = await fetch("/api/rollout", { method: "POST", headers: { ...headers(), "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      const out = document.getElementById("rolloutOut");
+      out.textContent = JSON.stringify(await r.json(), null, 2);
+      out.className = r.ok ? "ok" : "err";
+    }
+
+    async function status() {
+      const [ro, dev] = await Promise.all([
+        fetch("/api/rollout").then((r) => r.json()),
+        fetch("/api/devices").then((r) => r.json()),
+      ]);
+      document.getElementById("statusOut").textContent =
+        "ROLLOUTS:\n" + JSON.stringify(ro, null, 2) + "\n\nDEVICES:\n" + JSON.stringify(dev, null, 2);
+    }
+
+    document.getElementById("uploadBtn").onclick = upload;
+    document.getElementById("rolloutBtn").onclick = rollout;
+    document.getElementById("statusBtn").onclick = status;
+  </script>
+</body>
+</html>

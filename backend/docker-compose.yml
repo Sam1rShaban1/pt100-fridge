@@ -1,0 +1,107 @@
+services:
+  caddy:
+    image: caddy:2
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - grafana
+      - ota-server
+    restart: unless-stopped
+
+  mosquitto:
+    image: eclipse-mosquitto:2
+    ports:
+      - "8883:8883"
+    command: >-
+      sh -c "if [ ! -f /etc/mosquitto/passwd ]; then
+      mosquitto_passwd -b -c /etc/mosquitto/passwd $$MQTT_ADMIN_USER $$MQTT_ADMIN_PASS;
+      mosquitto_passwd -b /etc/mosquitto/passwd telegraf $$MQTT_TELEGRAF_PASS; fi;
+      mosquitto -c /etc/mosquitto/mosquitto.conf"
+    environment:
+      MQTT_ADMIN_USER: server
+      MQTT_ADMIN_PASS: ${MQTT_ADMIN_PASS}
+      MQTT_TELEGRAF_PASS: ${MQTT_TELEGRAF_PASS}
+    volumes:
+      - ./mosquitto/mosquitto.conf:/etc/mosquitto/mosquitto.conf:ro
+      - ./mosquitto/certs:/etc/mosquitto/certs:ro
+      - mosquitto_data:/etc/mosquitto
+    restart: unless-stopped
+
+  influxdb3:
+    image: influxdb:3-core
+    environment:
+      INFLUXDB3_AUTH_TOKEN: ${INFLUX_TOKEN}
+    command: ["serve","--node-id","node0","--object-store","file","--data-dir","/var/lib/influxdb3/data"]
+    volumes:
+      - influxdb3_data:/var/lib/influxdb3/data
+    restart: unless-stopped
+
+  influxdb-init:
+    image: influxdb:3-core
+    depends_on:
+      influxdb3:
+        condition: service_started
+    environment:
+      INFLUXDB3_AUTH_TOKEN: ${INFLUX_TOKEN}
+      INFLUXDB3_HOST_URL: http://influxdb3:8181
+    entrypoint: ["sh","-c","sleep 5; influxdb3 create database ${INFLUXDB_DATABASE} || true"]
+    restart: "no"
+
+  telegraf:
+    image: telegraf:1.38
+    depends_on:
+      - influxdb3
+      - influxdb-init
+      - mosquitto
+    volumes:
+      - ./telegraf/telegraf.conf:/etc/telegraf/telegraf.conf:ro
+    environment:
+      INFLUX_TOKEN: ${INFLUX_TOKEN}
+      INFLUXDB_DATABASE: ${INFLUXDB_DATABASE}
+      MQTT_TELEGRAF_PASS: ${MQTT_TELEGRAF_PASS}
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11
+    depends_on:
+      - influxdb3
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD}
+      INFLUX_TOKEN: ${INFLUX_TOKEN}
+      INFLUXDB_DATABASE: ${INFLUXDB_DATABASE}
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana_data:/var/lib/grafana
+    restart: unless-stopped
+
+  ota-server:
+    build: ./ota-server
+    depends_on:
+      - mosquitto
+    environment:
+      MQTT_BROKER: mosquitto
+      MQTT_PORT: "1883"
+      MQTT_USER: server
+      MQTT_PASS: ${MQTT_ADMIN_PASS}
+      FIRMWARE_DIR: /data/firmware
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL}
+      OTA_ADMIN_TOKEN: ${OTA_ADMIN_TOKEN}
+      DEVICE_GROUPS: ${DEVICE_GROUPS}
+    volumes:
+      - ota_data:/data
+    restart: unless-stopped
+
+volumes:
+  caddy_data:
+  caddy_config:
+  mosquitto_data:
+  influxdb3_data:
+  grafana_data:
+  ota_data:
