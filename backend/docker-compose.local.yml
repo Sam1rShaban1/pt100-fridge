@@ -27,6 +27,8 @@ services:
     platform: linux/arm64
 
   ota-server:
+    # NOTE: do NOT pin platform here. A platform pin on a BUILD service makes
+    # BuildKit run `RUN pip install` in a mode that fails on the Pi (exit 159).
+    # ota-server builds natively on arm64 without it.
     ports:
       - "8010:8000"
-    platform: linux/arm64
