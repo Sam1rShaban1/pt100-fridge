@@ -20,6 +20,11 @@ services:
     security_opt:
       - seccomp=unconfined
 
+  influxdb-init:
+    platform: linux/arm64
+    security_opt:
+      - seccomp=unconfined
+
   mosquitto:
     platform: linux/arm64
     security_opt:
