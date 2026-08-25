@@ -10,7 +10,7 @@ from fastapi.staticfiles import StaticFiles
 
 import uvicorn
 
-from store import (
+from app.store import (
     init_db,
     add_firmware,
     get_firmware,
@@ -18,7 +18,7 @@ from store import (
     upsert_device,
     get_all_devices,
 )
-from mqtt_client import init as mqtt_init, publish
+from app.mqtt_client import init as mqtt_init, publish
 
 FIRMWARE_DIR = Path(os.environ.get("FIRMWARE_DIR", "/data/firmware"))
 FIRMWARE_DIR.mkdir(parents=True, exist_ok=True)

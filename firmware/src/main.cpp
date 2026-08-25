@@ -18,16 +18,24 @@ void setup() {
     Serial.print(".");
   }
   Serial.println("\nWiFi connected");
+  Serial.print("IP=");  Serial.println(WiFi.localIP());
+  Serial.print("GW=");  Serial.println(WiFi.gatewayIP());
+  Serial.print("MQTT target="); Serial.print(MQTT_BROKER); Serial.print(":"); Serial.println(MQTT_PORT);
 
   // Build the sensor list from SENSOR_DEFS in config.h
   #define SENSOR(id, cs) sensors.add(#id, cs);
   SENSOR_DEFS
   #undef SENSOR
+  Serial.println("sensors added");
   sensors.begin(MAX31865_3WIRE);
+  Serial.println("sensors begun");
 
   mqttInit();
+  Serial.println("mqttInit done");
   mqttConnect();
+  Serial.println("mqttConnect done");
   otaInit();
+  Serial.println("otaInit done");
 }
 
 unsigned long lastPub = 0;

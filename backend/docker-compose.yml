@@ -18,40 +18,48 @@ services:
   mosquitto:
     image: eclipse-mosquitto:2
     ports:
+      - "1883:1883"
       - "8883:8883"
     command: >-
-      sh -c "if [ ! -f /etc/mosquitto/passwd ]; then
-      mosquitto_passwd -b -c /etc/mosquitto/passwd $$MQTT_ADMIN_USER $$MQTT_ADMIN_PASS;
-      mosquitto_passwd -b /etc/mosquitto/passwd telegraf $$MQTT_TELEGRAF_PASS; fi;
-      mosquitto -c /etc/mosquitto/mosquitto.conf"
+      sh -c "if [ ! -f /mosquitto/data/passwd ]; then
+      mosquitto_passwd -b -c /mosquitto/data/passwd $$MQTT_ADMIN_USER $$MQTT_ADMIN_PASS;
+      mosquitto_passwd -b /mosquitto/data/passwd telegraf $$MQTT_TELEGRAF_PASS; fi;
+      mosquitto_passwd -b /mosquitto/data/passwd fridge-001 $$MQTT_DEVICE_PASS;
+      mosquitto_passwd -b /mosquitto/data/passwd fridge-002 $$MQTT_DEVICE_PASS;
+      mosquitto_passwd -b /mosquitto/data/passwd fridge-003 $$MQTT_DEVICE_PASS;
+      mosquitto -c /mosquitto/config/mosquitto.conf"
     environment:
       MQTT_ADMIN_USER: server
       MQTT_ADMIN_PASS: ${MQTT_ADMIN_PASS}
       MQTT_TELEGRAF_PASS: ${MQTT_TELEGRAF_PASS}
+      MQTT_DEVICE_PASS: ${MQTT_DEVICE_PASS}
     volumes:
-      - ./mosquitto/mosquitto.conf:/etc/mosquitto/mosquitto.conf:ro
-      - ./mosquitto/certs:/etc/mosquitto/certs:ro
-      - mosquitto_data:/etc/mosquitto
+      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - ./mosquitto/certs:/mosquitto/config/certs:ro
+      - mosquitto_data:/mosquitto/data
     restart: unless-stopped
 
   influxdb3:
     image: influxdb:3-core
+    user: "0:0"
     environment:
       INFLUXDB3_AUTH_TOKEN: ${INFLUX_TOKEN}
-    command: ["serve","--node-id","node0","--object-store","file","--data-dir","/var/lib/influxdb3/data"]
+    command: ["serve","--node-id","node0","--object-store","file","--data-dir","/var/lib/influxdb3/data","--without-auth"]
     volumes:
       - influxdb3_data:/var/lib/influxdb3/data
     restart: unless-stopped
 
   influxdb-init:
     image: influxdb:3-core
+    user: "0:0"
     depends_on:
       influxdb3:
         condition: service_started
     environment:
+      INFLUXDB_DATABASE: ${INFLUXDB_DATABASE}
       INFLUXDB3_AUTH_TOKEN: ${INFLUX_TOKEN}
       INFLUXDB3_HOST_URL: http://influxdb3:8181
-    entrypoint: ["sh","-c","sleep 5; influxdb3 create database ${INFLUXDB_DATABASE} || true"]
+    entrypoint: ["sh","-c","sleep 5; influxdb3 create database $${INFLUXDB_DATABASE} --token $${INFLUXDB3_AUTH_TOKEN} -H $${INFLUXDB3_HOST_URL} || true"]
     restart: "no"
 
   telegraf:
@@ -69,7 +77,7 @@ services:
     restart: unless-stopped
 
   grafana:
-    image: grafana/grafana:11
+    image: grafana/grafana:11.6.0
     depends_on:
       - influxdb3
     environment:
@@ -79,6 +87,8 @@ services:
     volumes:
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
       - grafana_data:/var/lib/grafana
+    ports:
+      - "3000:3000"
     restart: unless-stopped
 
   ota-server:
@@ -94,6 +104,8 @@ services:
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL}
       OTA_ADMIN_TOKEN: ${OTA_ADMIN_TOKEN}
       DEVICE_GROUPS: ${DEVICE_GROUPS}
+    ports:
+      - "8010:8000"
     volumes:
       - ota_data:/data
     restart: unless-stopped

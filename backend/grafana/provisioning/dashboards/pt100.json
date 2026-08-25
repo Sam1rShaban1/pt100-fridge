@@ -1,0 +1,77 @@
+{
+  "title": "PT100 Fridge",
+  "uid": "pt100-fridge",
+  "schemaVersion": 39,
+  "version": 1,
+  "time": { "from": "now-6h", "to": "now" },
+  "timezone": "browser",
+  "refresh": "10s",
+  "panels": [
+    {
+      "id": 1,
+      "title": "Temperature (°C)",
+      "type": "timeseries",
+      "datasource": { "type": "influxdb", "uid": "pt100-influxdb" },
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 0 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "celsius",
+          "custom": { "drawStyle": "line", "lineWidth": 2, "pointSize": 3, "lineInterpolation": "linear", "fillOpacity": 10 }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "influxdb", "uid": "pt100-influxdb" },
+          "rawQuery": true,
+          "query": "SELECT \"temp\" FROM \"pt100\" WHERE $timeFilter GROUP BY time($__interval), \"sensor_id\" fill(null)"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Resistance (Ω)",
+      "type": "timeseries",
+      "datasource": { "type": "influxdb", "uid": "pt100-influxdb" },
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 9 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ohm",
+          "custom": { "drawStyle": "line", "lineWidth": 2, "pointSize": 3, "lineInterpolation": "linear", "fillOpacity": 10 }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "B",
+          "datasource": { "type": "influxdb", "uid": "pt100-influxdb" },
+          "rawQuery": true,
+          "query": "SELECT \"resistance\" FROM \"pt100\" WHERE $timeFilter GROUP BY time($__interval), \"sensor_id\" fill(null)"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Fault flag",
+      "type": "timeseries",
+      "datasource": { "type": "influxdb", "uid": "pt100-influxdb" },
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 18 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "drawStyle": "points", "pointSize": 5, "lineWidth": 1 }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "C",
+          "datasource": { "type": "influxdb", "uid": "pt100-influxdb" },
+          "rawQuery": true,
+          "query": "SELECT \"fault\" FROM \"pt100\" WHERE $timeFilter GROUP BY time($__interval), \"sensor_id\" fill(null)"
+        }
+      ]
+    }
+  ]
+}

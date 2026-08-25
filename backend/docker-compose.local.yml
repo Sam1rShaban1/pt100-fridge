@@ -3,7 +3,7 @@
 #   docker compose -f docker-compose.yml -f docker-compose.local.yml up -d
 # Then reach:
 #   Grafana    http://<pi-ip>:3000
-#   OTA server http://<pi-ip>:8000
+#   OTA server http://<pi-ip>:8010
 # Caddy (public TLS / Let's Encrypt) is disabled here because it needs a
 # public domain + ports 80/443.
 services:
@@ -16,4 +16,4 @@ services:
 
   ota-server:
     ports:
-      - "8000:8000"
+      - "8010:8000"

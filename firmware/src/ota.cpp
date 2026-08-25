@@ -45,8 +45,12 @@ void otaPublishStatus(const char* state, const char* version) {
 static void doUpdate(const char* url, const char* sha256Hex, const char* newVer) {
   otaPublishStatus("downloading", newVer);
 
+#ifdef LOCAL_DEV
+  WiFiClient client;
+#else
   WiFiClientSecure client;
   client.setCACert(ISRG_X1_ROOT);   // HTTPS cert issued by Caddy/Let's Encrypt
+#endif
   client.setTimeout(30000);
 
   HTTPClient http;
@@ -119,8 +123,12 @@ void otaHandleCommand(const char* topic, const char* payload) {
 }
 
 void otaCheckManifest() {
+#ifdef LOCAL_DEV
+  WiFiClient client;
+#else
   WiFiClientSecure client;
   client.setCACert(ISRG_X1_ROOT);
+#endif
   client.setTimeout(15000);
 
   HTTPClient http;
