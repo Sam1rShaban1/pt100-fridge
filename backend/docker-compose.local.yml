@@ -50,3 +50,14 @@ services:
       - "8010:8000"
     security_opt:
       - seccomp=unconfined
+
+  # Outbound tunnel to Grafana — no router port-forward / public IP needed.
+  # Prints a random https://<id>.trycloudflare.com URL in the logs.
+  # For a stable URL, use a named tunnel + Cloudflare account instead.
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    platform: linux/arm64
+    command: tunnel --no-autoupdate --url http://grafana:3000
+    restart: unless-stopped
+    security_opt:
+      - seccomp=unconfined
