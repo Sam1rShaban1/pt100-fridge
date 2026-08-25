@@ -32,7 +32,7 @@
 #define OTA_POLL_MS    3600000UL   // check the manifest once per hour
 
 // ===================== Sensors =====================
-#define PUBLISH_MS     5000UL
+#define PUBLISH_MS     500UL
 #define RREF           430.0f      // PT100 reference resistor (0.1%) -> SMD "431" = 430R
 #define RNOMINAL       100.0f      // PT100 resistance at 0 C
 
