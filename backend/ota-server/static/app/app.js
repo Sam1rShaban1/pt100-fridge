@@ -286,7 +286,7 @@ function makeChart(host, ch) {
   const fill = ch.color + "1f";
   const opts = {
     width: Math.max(host.clientWidth || 480, 220),
-    height: 260,
+    height: 312,
     padding: [12, 14, 26, 42],
     cursor: {
       points: { size: 5, width: 2, stroke: ch.color, fill: "#0d1117" },
@@ -322,7 +322,7 @@ function makeChart(host, ch) {
 function sizeChart(ch) {
   if (!ch.u) return;
   const w = Math.max(ch.el.clientWidth || 480, 220);
-  ch.u.setSize({ width: w, height: 260 });
+  ch.u.setSize({ width: w, height: 312 });
 }
 
 function observeChart(ch) {
@@ -347,7 +347,14 @@ function flushLive() {
     if (!ch) return;
     for (const [x, y] of pts) { ch.xs.push(x); ch.ys.push(y); }
     while (ch.xs.length && ch.xs[0] < cutoff) { ch.xs.shift(); ch.ys.shift(); }
-    if (ch.u) ch.u.setData([ch.xs, ch.ys]);
+    if (ch.u) {
+      const u = ch.u;
+      const dMin = ch.xs[0], dMax = ch.xs[ch.xs.length - 1];
+      const sMin = u.scales.x.min, sMax = u.scales.x.max;
+      const zoomed = sMin != null && sMax != null &&
+        (sMin > dMin + 1e-6 || sMax < dMax - 1e-6);
+      u.setData([ch.xs, ch.ys], !zoomed);
+    }
   });
   state.liveQueue.clear();
   updateHistorySelection();
