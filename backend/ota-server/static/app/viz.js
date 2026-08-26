@@ -48,6 +48,7 @@ const SIN = Math.sin(Math.PI / 6);
 export function createModel3D(canvas) {
   const ctx = canvas.getContext("2d");
   let fieldSig = null;
+  let lastRoomId = null;
   let faceTex = null;
   let particles = null;
   let lastT = 0;
@@ -145,7 +146,10 @@ export function createModel3D(canvas) {
       fieldSig = sig;
       const field = makeField(room, readings);
       faceTex = buildFaces(room, field, cs);
+    }
+    if (!particles || lastRoomId !== room.id) {
       particles = initParticles(d);
+      lastRoomId = room.id;
     }
 
     const P = (x, y, z) => ({ x: (x - y) * COS * scale + ox, y: ((x + y) * SIN - z) * scale + oy });

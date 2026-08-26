@@ -31,6 +31,20 @@
     </aside>
   </div>
 
+  <section class="history" id="history">
+    <div class="history-head">
+      <h3>Temperature history</h3>
+      <div class="seg" id="range-seg" role="tablist" aria-label="Time range">
+        <button class="seg-btn" data-min="30" role="tab">30m</button>
+        <button class="seg-btn active" data-min="60" role="tab">1h</button>
+        <button class="seg-btn" data-min="360" role="tab">6h</button>
+        <button class="seg-btn" data-min="1440" role="tab">24h</button>
+      </div>
+    </div>
+    <p class="history-hint">Drag across a chart to zoom the time axis. Double-click to reset.</p>
+    <div class="history-grid" id="hist-grid"></div>
+  </section>
+
   <script src="vendor/uPlot.iife.min.js"></script>
   <script type="module" src="app.js"></script>
 </body>

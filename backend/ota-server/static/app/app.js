@@ -151,10 +151,6 @@ function renderView() {
   const room = currentRoom();
   const view = $("#view");
   if (!room) { view.innerHTML = `<div class="room-head"><h2>Select a cold room</h2></div>`; return; }
-  const th = room.thresholds || state.cfg.thresholds;
-  const min = th.target_min, warn = th.warn_max, alarm = th.alarm_max, max = state.cfg.color_scale.max;
-  const warnPct = ((warn - min) / (max - min)) * 100;
-  const alarmPct = ((alarm - min) / (max - min)) * 100;
 
   view.innerHTML = `
     <div class="room-head">
@@ -170,23 +166,7 @@ function renderView() {
         <div class="legend-wrap"><span class="num" id="leg-min"></span><canvas id="legend"></canvas><span class="num" id="leg-max"></span></div>
         <p class="plane-note" id="plane-note"></p>
       </div>
-    </div>
-    <section class="history" id="history">
-      <div class="history-head">
-        <h3>Temperature history</h3>
-        <div class="seg" id="range-seg" role="tablist" aria-label="Time range">
-          ${MINUTES.map(m => `<button class="seg-btn${state.rangeMin === m.v ? " active" : ""}" data-min="${m.v}" role="tab">${m.label}</button>`).join("")}
-        </div>
-      </div>
-      <div class="history-grid" id="hist-grid"></div>
-    </section>`;
-
-  $("#range-seg").addEventListener("click", (e) => {
-    const b = e.target.closest(".seg-btn"); if (!b) return;
-    state.rangeMin = Number(b.dataset.min);
-    $$("#range-seg .seg-btn").forEach(x => x.classList.toggle("active", x === b));
-    buildHistory(room);
-  });
+    </div>`;
 
   const fc = $("#field");
   state.model = createModel3D(fc);
@@ -308,11 +288,11 @@ function makeChart(host, ch) {
   const fill = ch.color + "1f";
   const opts = {
     width: Math.max(host.clientWidth || 480, 220),
-    height: 190,
-    padding: [10, 12, 22, 36],
+    height: 260,
+    padding: [12, 14, 26, 42],
     cursor: {
       points: { size: 5, width: 2, stroke: ch.color, fill: "#0d1117" },
-      drag: { x: false, y: false },
+      drag: { x: true, y: false },
     },
     legend: { show: false },
     scales: { x: { time: true } },
@@ -344,7 +324,7 @@ function makeChart(host, ch) {
 function sizeChart(ch) {
   if (!ch.u) return;
   const w = Math.max(ch.el.clientWidth || 480, 220);
-  ch.u.setSize({ width: w, height: 190 });
+  ch.u.setSize({ width: w, height: 260 });
 }
 
 function observeChart(ch) {
@@ -454,6 +434,13 @@ async function boot() {
   buildSidebar();
   if (!state.selectedRoom && state.fridges[0]) state.selectedRoom = state.fridges[0].id;
   renderView();
+  const rs = $("#range-seg");
+  if (rs) rs.addEventListener("click", (e) => {
+    const b = e.target.closest(".seg-btn"); if (!b) return;
+    state.rangeMin = Number(b.dataset.min);
+    $$("#range-seg .seg-btn").forEach(x => x.classList.toggle("active", x === b));
+    buildHistory(currentRoom());
+  });
   connectSSE();
   setInterval(pollServer, 4000);
   setInterval(() => { if (state.connected) updateRoomLive(); }, 2500);
