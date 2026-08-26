@@ -79,15 +79,17 @@ body {
 
 /* ---------- shell ---------- */
 .layout {
-  flex: 1 0 auto;
+  height: calc(100dvh - 56px);
   display: grid;
   grid-template-columns: minmax(0, 1fr) 252px;
-  min-height: calc(100dvh - 56px);
 }
 
 #view {
-  overflow: visible;
-  padding: clamp(12px, 2vw, 20px);
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
 }
 
 .sidebar {
@@ -95,10 +97,6 @@ body {
   background: var(--panel);
   overflow-y: auto;
   padding: 14px 10px;
-  position: sticky;
-  top: 56px;
-  align-self: start;
-  max-height: calc(100dvh - 56px);
 }
 .sidebar h3 {
   margin: 0 6px 10px;
@@ -196,9 +194,10 @@ body {
 
 /* ---------- room view ---------- */
 .room-head {
+  flex: none;
   display: flex; flex-wrap: wrap; align-items: center;
   gap: 8px 16px;
-  margin-bottom: 14px;
+  padding: 14px clamp(12px, 2vw, 20px) 10px;
 }
 .room-head h2 { margin: 0; font-size: 20px; font-weight: 650; }
 .room-head p { margin: 0; color: var(--mut); font-family: var(--mono); font-size: 12px; }
@@ -217,8 +216,9 @@ body {
 .seg button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 
 .alarm-banner {
-  margin: 0 0 14px;
-  padding: 10px 14px;
+  flex: none;
+  margin: 0 0 10px clamp(12px, 2vw, 20px);
+  padding: 9px 14px;
   border-radius: var(--r);
   border: 1px solid rgba(52, 211, 153, 0.4);
   background: rgba(52, 211, 153, 0.07);
@@ -229,25 +229,23 @@ body {
 .alarm-banner.alarm { border-color: rgba(248, 113, 113, 0.5); background: rgba(248, 113, 113, 0.09); color: #fecaca; }
 
 .stage {
-  flex: none;
-  min-height: min(66vh, 640px);
-  display: flex; flex-direction: column; align-items: center; justify-content: center;
-  gap: 12px;
-  padding: 0 20%;
-  margin-bottom: 24px;
+  flex: 1;
+  position: relative;
+  min-height: 0;
+  margin: 0 clamp(12px, 2vw, 20px) 12px;
 }
-.plan-panel { flex: 1; display: flex; flex-direction: column; align-items: center; width: 100%; min-height: 0; }
-.plan-wrap { position: relative; width: 100%; flex: 1; min-height: 0; }
-.plan-canvas { display: block; width: 100%; height: 100%; border-radius: calc(var(--r) - 2px); }
+.plan-wrap { position: absolute; inset: 0; }
+.plan-canvas { position: absolute; inset: 0; display: block; border-radius: calc(var(--r) - 2px); }
 
 .legend-wrap {
+  position: absolute; left: 14px; right: 14px; bottom: 8px;
   display: flex; align-items: center; gap: 12px;
-  margin-top: 12px;
+  z-index: 2;
   font-family: var(--mono); font-size: 11px; color: var(--mut);
 }
 #legend { height: 10px; flex: 1; max-width: 340px; border-radius: 5px; }
 
-.plane-note { margin-top: 8px; color: var(--mut); font-size: 11px; }
+.plane-note { position: absolute; left: 14px; bottom: 32px; z-index: 2; color: var(--mut); font-size: 11px; }
 
 /* ---------- history ---------- */
 .history {
@@ -301,7 +299,7 @@ body {
 /* ---------- mobile ---------- */
 @media (max-width: 900px) {
   body { height: auto; min-height: 100dvh; overflow: auto; }
-  .layout { grid-template-columns: 1fr; }
+  .layout { grid-template-columns: 1fr; height: auto; }
   .sidebar {
     order: -1;
     border-left: 0;
@@ -313,7 +311,7 @@ body {
   .sidebar h3 { display: none; }
   #room-list { display: flex; gap: 6px; }
   .room-item { flex: none; margin: 0; }
-  .stage { padding: 0 8px; min-height: 48vh; }
+  .stage { min-height: 50vh; }
   .history { padding: 18px 14px 40px; }
   .history-grid { max-width: 100%; }
 }

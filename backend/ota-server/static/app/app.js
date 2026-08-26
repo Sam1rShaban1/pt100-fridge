@@ -161,11 +161,9 @@ function renderView() {
     </div>
     <div class="alarm-banner" id="banner"></div>
     <div class="stage">
-      <div class="plan-panel">
-        <div class="plan-wrap"><canvas class="plan-canvas" id="field"></canvas></div>
-        <div class="legend-wrap"><span class="num" id="leg-min"></span><canvas id="legend"></canvas><span class="num" id="leg-max"></span></div>
-        <p class="plane-note" id="plane-note"></p>
-      </div>
+      <div class="plan-wrap"><canvas class="plan-canvas" id="field"></canvas></div>
+      <div class="legend-wrap"><span class="num" id="leg-min"></span><canvas id="legend"></canvas><span class="num" id="leg-max"></span></div>
+      <p class="plane-note" id="plane-note"></p>
     </div>`;
 
   const fc = $("#field");

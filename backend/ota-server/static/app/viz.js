@@ -127,10 +127,12 @@ export function createModel3D(canvas) {
 
   function render(room, readings, cfg, selectedId, t) {
     const dpr = window.devicePixelRatio || 1;
-    const cw = canvas.clientWidth || 600;
-    const chh = canvas.clientHeight || 420;
+    const wrap = canvas.parentElement;
+    const cw = wrap.clientWidth || 600;
+    const chh = wrap.clientHeight || Math.round(cw * 0.5);
     if (canvas.width !== Math.round(cw * dpr) || canvas.height !== Math.round(chh * dpr)) {
       canvas.width = Math.round(cw * dpr); canvas.height = Math.round(chh * dpr);
+      canvas.style.width = cw + "px"; canvas.style.height = chh + "px";
     }
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, cw, chh);
