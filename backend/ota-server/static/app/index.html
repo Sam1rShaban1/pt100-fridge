@@ -22,7 +22,15 @@
     </div>
   </header>
 
-  <main id="view" aria-live="polite"></main>
+  <div class="layout">
+    <main id="view" aria-live="polite"></main>
+    <aside class="sidebar" aria-label="Rooms">
+      <h3>Cold rooms</h3>
+      <nav id="room-list"></nav>
+    </aside>
+  </div>
+
+  <footer class="bottombar" id="bottombar" aria-label="Per-sensor trends"></footer>
 
   <script type="module" src="app.js"></script>
 </body>

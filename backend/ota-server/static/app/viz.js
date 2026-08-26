@@ -171,13 +171,12 @@ export function lineColor(i) {
   return LINE_COLORS[i % LINE_COLORS.length];
 }
 
-export function drawChart(canvas, series, room, minutes) {
+export function drawChart(canvas, series, room, minutes, heightCss = 190) {
   const wrap = canvas.parentElement.clientWidth || 600;
-  const Hcss = 190;
+  const Hcss = heightCss;
   const dpr = window.devicePixelRatio || 1;
   canvas.width = wrap * dpr;
   canvas.height = Hcss * dpr;
-  canvas.style.height = Hcss + "px";
   const ctx = canvas.getContext("2d");
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, wrap, Hcss);
