@@ -1,4 +1,6 @@
-import { cssTempColor, heatColor, drawField, drawLegend, planeOf, sensorUV, fmt1 } from "./viz.js";
+import { cssTempColor, drawField, drawLegend, planeOf, sensorUV } from "./viz.js";
+
+const fmt1 = (v) => v == null || isNaN(v) ? "--.-" : Number(v).toFixed(1);
 
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
