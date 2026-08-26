@@ -97,25 +97,28 @@ export function createModel3D(canvas) {
     const d = room.dims_m;
     const N = 56;
     const mk = () => { const c = document.createElement("canvas"); c.width = N; c.height = N; return c; };
-    const floor = mk(), wallL = mk(), wallR = mk();
+    const floor = mk(), wallL = mk(), wallR = mk(), wallFront = mk(), top = mk();
     paintFace(floor, field, (u, v) => ({ x: u, y: v, z: 0 }), d.length, d.width, cs);
     paintFace(wallL, field, (u, v) => ({ x: u, y: 0, z: v }), d.length, d.height, cs);
     paintFace(wallR, field, (u, v) => ({ x: d.length, y: u, z: v }), d.width, d.height, cs);
-    return { floor, wallL, wallR };
+    paintFace(wallFront, field, (u, v) => ({ x: u, y: d.width, z: v }), d.length, d.height, cs);
+    paintFace(top, field, (u, v) => ({ x: u, y: v, z: d.height }), d.length, d.width, cs);
+    return { floor, wallL, wallR, wallFront, top };
   }
 
   function initParticles(d) {
     const arr = [];
     const cx = d.length / 2, cy = d.width / 2;
-    for (let i = 0; i < 60; i++) {
+    for (let i = 0; i < 120; i++) {
       arr.push({
         theta: Math.random() * Math.PI * 2,
-        rad: 0.25 + Math.random() * 0.7,
-        speed: 0.25 + Math.random() * 0.45,
+        rad: 0.2 + Math.random() * 0.78,
+        speed: 0.3 + Math.random() * 0.6,
         zph: Math.random() * Math.PI * 2,
-        zsp: 0.3 + Math.random() * 0.5,
+        zsp: 0.3 + Math.random() * 0.6,
         cx, cy,
-        x: 0, y: 0, z: 0, px: 0, py: 0, pz: 0,
+        x: 0, y: 0, z: 0,
+        trail: [],
       });
     }
     return arr;
@@ -157,7 +160,7 @@ export function createModel3D(canvas) {
       minX = Math.min(minX, sx); maxX = Math.max(maxX, sx);
       minY = Math.min(minY, sy); maxY = Math.max(maxY, sy);
     }
-    const pad = 22;
+    const pad = 14;
     const scale = Math.min((cw - 2 * pad) / (maxX - minX), (chh - 2 * pad) / (maxY - minY));
     const ox = cw / 2 - (minX + maxX) / 2 * scale;
     const oy = chh / 2 - (minY + maxY) / 2 * scale;
@@ -176,9 +179,14 @@ export function createModel3D(canvas) {
     const fA = P(0, 0, 0), fB = P(d.length, 0, 0), fD = P(0, d.width, 0);
     const lA = P(0, 0, 0), lB = P(d.length, 0, 0), lD = P(0, 0, d.height);
     const rA = P(d.length, 0, 0), rB = P(d.length, d.width, 0), rD = P(d.length, 0, d.height);
-    drawFace(faceTex.floor, fA, fB, fD, 0.95);
-    drawFace(faceTex.wallL, lA, lB, lD, 0.45);
-    drawFace(faceTex.wallR, rA, rB, rD, 0.45);
+    const frA = P(0, d.width, 0), frB = P(d.length, d.width, 0), frD = P(0, d.width, d.height);
+    const tA = P(0, 0, d.height), tB = P(d.length, 0, d.height), tD = P(0, d.width, d.height);
+    // Opaque faces -> the box reads as a solid colored volume.
+    drawFace(faceTex.floor, fA, fB, fD, 1.0);
+    drawFace(faceTex.wallL, lA, lB, lD, 0.95);
+    drawFace(faceTex.wallR, rA, rB, rD, 0.97);
+    drawFace(faceTex.wallFront, frA, frB, frD, 0.97);
+    drawFace(faceTex.top, tA, tB, tD, 0.92);
 
     // Wireframe edges.
     const pe = corners.map(([x, y, z]) => P(x, y, z));
@@ -198,27 +206,43 @@ export function createModel3D(canvas) {
       ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
     }
 
-    // Flowing air particles.
+    // Flowing air: wind streaks with direction arrows (weather-map style).
     const dt = Math.min(0.05, lastT ? t - lastT : 0.016);
     lastT = t;
     if (!particles) particles = initParticles(d);
     const field = makeField(room, readings);
+    ctx.globalCompositeOperation = "lighter";
     for (const p of particles) {
-      p.px = p.x; p.py = p.y; p.pz = p.z;
       p.theta += p.speed * dt;
       p.zph += p.zsp * dt;
-      p.x = p.cx + p.rad * d.length * 0.5 * Math.cos(p.theta);
-      p.y = p.cy + p.rad * d.width * 0.5 * Math.sin(p.theta);
-      p.z = d.height * (0.5 + 0.42 * Math.sin(p.zph));
-      const from = P(p.px, p.py, p.pz), to = P(p.x, p.y, p.z);
-      const lt = field ? field(p.x, p.y, p.z) : (cs.min + cs.max) / 2;
+      const nx = p.cx + p.rad * d.length * 0.5 * Math.cos(p.theta);
+      const ny = p.cy + p.rad * d.width * 0.5 * Math.sin(p.theta);
+      const nz = d.height * (0.5 + 0.42 * Math.sin(p.zph));
+      p.trail.push({ x: nx, y: ny, z: nz });
+      if (p.trail.length > 9) p.trail.shift();
+      p.x = nx; p.y = ny; p.z = nz;
+      const lt = field ? field(nx, ny, nz) : (cs.min + cs.max) / 2;
       const m = tempColor(lt, cs.min, cs.max).match(/\d+/g);
-      ctx.strokeStyle = `rgba(${m[0]},${m[1]},${m[2]},0.28)`;
-      ctx.lineWidth = 1.2;
-      ctx.beginPath(); ctx.moveTo(from.x, from.y); ctx.lineTo(to.x, to.y); ctx.stroke();
-      ctx.fillStyle = `rgba(${m[0]},${m[1]},${m[2]},0.5)`;
-      ctx.beginPath(); ctx.arc(to.x, to.y, 1.3, 0, Math.PI * 2); ctx.fill();
+      const pts = p.trail.map(q => P(q.x, q.y, q.z));
+      for (let k = 1; k < pts.length; k++) {
+        const a = (k / pts.length) * 0.5;
+        ctx.strokeStyle = `rgba(${m[0]},${m[1]},${m[2]},${a})`;
+        ctx.lineWidth = 1.4 * (k / pts.length) + 0.3;
+        ctx.beginPath(); ctx.moveTo(pts[k - 1].x, pts[k - 1].y); ctx.lineTo(pts[k].x, pts[k].y); ctx.stroke();
+      }
+      if (pts.length >= 2) {
+        const head = pts[pts.length - 1], prev = pts[pts.length - 2];
+        const ang = Math.atan2(head.y - prev.y, head.x - prev.x);
+        const ah = 4.5;
+        ctx.fillStyle = `rgba(${m[0]},${m[1]},${m[2]},0.9)`;
+        ctx.beginPath();
+        ctx.moveTo(head.x, head.y);
+        ctx.lineTo(head.x - ah * Math.cos(ang - 0.42), head.y - ah * Math.sin(ang - 0.42));
+        ctx.lineTo(head.x - ah * Math.cos(ang + 0.42), head.y - ah * Math.sin(ang + 0.42));
+        ctx.closePath(); ctx.fill();
+      }
     }
+    ctx.globalCompositeOperation = "source-over";
 
     // Sensor markers.
     markers = [];
