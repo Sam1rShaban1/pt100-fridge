@@ -1,4 +1,4 @@
-import { cssTempColor, drawField, drawLegend, planeOf, sensorUV } from "./viz.js";
+import { cssTempColor, drawLegend, createModel3D } from "./viz.js";
 
 const fmt1 = (v) => v == null || isNaN(v) ? "--.-" : Number(v).toFixed(1);
 
@@ -16,11 +16,6 @@ const LINE_COLORS = [
   "#fb7185", "#22d3ee", "#facc15", "#f472b6",
 ];
 
-const PLANES = {
-  floor: { label: "Floor", long: "Floor plan (top view)" },
-  side: { label: "Side", long: "Side elevation (front view)" },
-};
-
 const MINUTES = [
   { v: 30, label: "30m" },
   { v: 60, label: "1h" },
@@ -32,7 +27,7 @@ const state = {
   fridges: [],
   cfg: null,
   latest: {},
-  plane: "floor",
+  model: null,
   rangeMin: 60,
   selectedRoom: null,
   selectedSensor: null,
@@ -167,16 +162,11 @@ function renderView() {
         <h2>${escapeHtml(room.name)}</h2>
         <p>${escapeHtml(room.dims)}</p>
       </div>
-      <div class="room-controls">
-        <div class="seg" id="plane-seg" role="tablist" aria-label="View plane">
-          ${Object.entries(PLANES).map(([k, p]) => `<button class="seg-btn${state.plane === k ? " active" : ""}" data-plane="${k}" role="tab">${p.label}</button>`).join("")}
-        </div>
-      </div>
     </div>
     <div class="alarm-banner" id="banner"></div>
     <div class="stage">
       <div class="plan-panel">
-        <div class="plan-wrap"><canvas class="plan-canvas" id="field"></canvas><div class="dots" id="dots"></div></div>
+        <div class="plan-wrap"><canvas class="plan-canvas" id="field"></canvas></div>
         <div class="legend-wrap"><span class="num" id="leg-min"></span><canvas id="legend"></canvas><span class="num" id="leg-max"></span></div>
         <p class="plane-note" id="plane-note"></p>
       </div>
@@ -191,12 +181,6 @@ function renderView() {
       <div class="history-grid" id="hist-grid"></div>
     </section>`;
 
-  $("#plane-seg").addEventListener("click", (e) => {
-    const b = e.target.closest(".seg-btn"); if (!b) return;
-    state.plane = b.dataset.plane;
-    $$("#plane-seg .seg-btn").forEach(x => x.classList.toggle("active", x === b));
-    paintField(room);
-  });
   $("#range-seg").addEventListener("click", (e) => {
     const b = e.target.closest(".seg-btn"); if (!b) return;
     state.rangeMin = Number(b.dataset.min);
@@ -204,45 +188,24 @@ function renderView() {
     buildHistory(room);
   });
 
+  const fc = $("#field");
+  state.model = createModel3D(fc);
+  fc.addEventListener("click", (e) => {
+    const rect = fc.getBoundingClientRect();
+    const id = state.model && state.model.pick(e.clientX - rect.left, e.clientY - rect.top);
+    if (id) selectSensor(room.id, id);
+  });
+
   paintField(room);
   buildHistory(room);
 }
 
-function paintDots(room) {
-  const dots = $("#dots"); if (!dots) return;
-  const c = $("#field");
-  const W = c.clientWidth, H = c.clientHeight;
-  const pad = 12;
-  const P = W ? pad / W : 0;
-  dots.innerHTML = "";
-  const pl = planeOf(room, state.plane);
-  (room.sensors || []).forEach(s => {
-    const uv = sensorUV(s, state.plane);
-    const xf = P + (uv.u / pl.U) * (1 - 2 * P);
-    const vf = P + (uv.v / pl.V) * (1 - 2 * P);
-    const el = document.createElement("div");
-    const stale = isStale(s.id);
-    el.className = "sdot" + (state.selectedSensor === s.id ? " selected" : "") + (stale ? " stale" : "");
-    el.style.left = (xf * 100) + "%";
-    el.style.top = (vf * 100) + "%";
-    const r = state.latest[s.id];
-    const col = stale ? "var(--mut)" : cssTempColor(r?.temp, state.cfg.color_scale.min, state.cfg.color_scale.max);
-    el.innerHTML = `<span class="sdot-dot" style="background:${col}"></span><span class="sdot-label">${escapeHtml(s.label)} ${stale ? "--.-" : fmt1(r?.temp)}°</span>`;
-    el.addEventListener("click", () => selectSensor(room.id, s.id));
-    dots.appendChild(el);
-  });
-}
-
 function paintField(room) {
-  const c = $("#field"); if (!c) return;
-  drawField(c, room, state.plane, state.latest, state.cfg);
-  drawLegend($("#legend"), state.cfg.color_scale, 200);
+  drawLegend($("#legend"), state.cfg.color_scale);
   $("#leg-min").textContent = fmt1(state.cfg.color_scale.min) + "°";
   $("#leg-max").textContent = fmt1(state.cfg.color_scale.max) + "°";
-  const p = PLANES[state.plane];
   const th = room.thresholds || state.cfg.thresholds;
-  $("#plane-note").innerHTML = `${p.long} &middot; target ${fmt1(th.target_min)}–${fmt1(th.target_max)}°C &middot; warn ${fmt1(th.warn_max)}° &middot; alarm ${fmt1(th.alarm_max)}°`;
-  paintDots(room);
+  $("#plane-note").innerHTML = `3D cold-room model &middot; target ${fmt1(th.target_min)}–${fmt1(th.target_max)}°C &middot; warn ${fmt1(th.warn_max)}° &middot; alarm ${fmt1(th.alarm_max)}°`;
 }
 
 function updateRoomLive() {
@@ -486,7 +449,7 @@ async function boot() {
     state.cfg = { color_scale: data.color_scale, stale_after_s: data.stale_after_s || 15, thresholds: null };
   } catch (e) {
     state.fridges = [];
-    state.cfg = { color_scale: { min: -25, max: 25 }, stale_after_s: 15, thresholds: null };
+    state.cfg = { color_scale: { min: -10, max: 15 }, stale_after_s: 15, thresholds: null };
   }
   buildSidebar();
   if (!state.selectedRoom && state.fridges[0]) state.selectedRoom = state.fridges[0].id;
@@ -494,7 +457,12 @@ async function boot() {
   connectSSE();
   setInterval(pollServer, 4000);
   setInterval(() => { if (state.connected) updateRoomLive(); }, 2500);
-  window.addEventListener("resize", () => { const r = currentRoom(); if (r) paintField(r); });
+  function loop(ts) {
+    const room = currentRoom();
+    if (room && state.model) state.model.render(room, state.latest, state.cfg, state.selectedSensor, ts / 1000);
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
 }
 
 boot();

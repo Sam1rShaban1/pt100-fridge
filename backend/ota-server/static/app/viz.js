@@ -1,24 +1,19 @@
-/* Rendering: temperature color scale, IDW heat field, room chrome,
-   trend chart, legend. Pure canvas, no dependencies. */
+/* Rendering: temperature color scale, isometric 3D cold-room model with a
+   volumetric IDW heat field across all visible faces and a flowing-air
+   particle animation. Pure canvas, no dependencies. */
 
 export function tempColor(t, min, max) {
-  // Thermal stops in degrees C. Data encoding, not decoration.
+  // Chiller-focused scale: 4 bands, smooth interpolation between anchors.
   const stops = [
-    [-25, [35, 48, 110]],
-    [-12, [43, 88, 196]],
-    [-4, [42, 163, 201]],
-    [0, [57, 198, 183]],
-    [4, [126, 217, 138]],
-    [8, [226, 201, 79]],
-    [13, [239, 155, 61]],
-    [18, [227, 91, 52]],
-    [25, [194, 40, 35]],
+    [-10, [26, 42, 92]],    // deep navy (well below freezing)
+    [-5,  [43, 87, 196]],   // blue
+    [0,   [42, 163, 201]],  // cyan (setpoint low)
+    [5,   [56, 217, 150]],  // green (setpoint high)
+    [15,  [227, 91, 52]],   // red (alarm / warm)
   ];
   let a = stops[0], b = stops[stops.length - 1];
   for (let i = 0; i < stops.length - 1; i++) {
-    if (t >= stops[i][0] && t <= stops[i + 1][0]) {
-      a = stops[i]; b = stops[i + 1]; break;
-    }
+    if (t >= stops[i][0] && t <= stops[i + 1][0]) { a = stops[i]; b = stops[i + 1]; break; }
   }
   const span = b[0] - a[0] || 1;
   const k = Math.max(0, Math.min(1, (t - a[0]) / span));
@@ -30,233 +25,10 @@ export function tempColor(t, min, max) {
   return `rgb(${rgb[0]},${rgb[1]},${rgb[2]})`;
 }
 
-export function cssTempColor(t, min, max) {
-  return tempColor(t, min, max);
-}
-
-function hexRgb(hex) {
-  const n = parseInt(hex.slice(1), 16);
-  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
-}
-
-// Plane axes: "floor" maps sensors to (x, y); "wall" to (x, z).
-export function planeOf(room, plane) {
-  const d = room.dims_m;
-  return plane === "wall"
-    ? { U: d.length, V: d.height }
-    : { U: d.length, V: d.width };
-}
-
-export function sensorUV(sensor, plane) {
-  return plane === "wall"
-    ? { u: sensor.x_m, v: sensor.z_m ?? sensor.y_m }
-    : { u: sensor.x_m, v: sensor.y_m };
-}
-
-/* Inverse-distance weighting over a coarse grid, upscaled with smoothing.
-   One active sensor naturally yields a uniform field. */
-export function drawField(canvas, room, plane, readings, cfg) {
-  const wrap = canvas.parentElement.clientWidth || 600;
-  const { U, V } = planeOf(room, plane);
-  const pad = 12;
-  const scale = Math.max((wrap - pad * 2) / U, 10); // px per meter
-  const W = Math.round(U * scale);
-  const H = Math.round(V * scale);
-  const dpr = window.devicePixelRatio || 1;
-
-  canvas.style.width = W + "px";
-  canvas.style.height = H + "px";
-  canvas.width = W * dpr;
-  canvas.height = H * dpr;
-  canvas.getContext("2d").setTransform(dpr, 0, 0, dpr, 0, 0);
-
-  const ctx = canvas.getContext("2d");
-  const cs = cfg.color_scale || { min: -25, max: 25 };
-
-  // Active points for interpolation.
-  const pts = [];
-  for (const s of room.sensors || []) {
-    const r = readings[s.id];
-    if (!r || r.temp == null || isNaN(r.temp)) continue;
-    const { u, v } = sensorUV(s, plane);
-    pts.push({ u, v, t: r.temp });
-  }
-
-  // Coarse grid -> ImageData -> smoothed upscale.
-  const gw = Math.max(24, Math.round(U / 0.12));
-  const gh = Math.max(14, Math.round(V / 0.12));
-  const off = document.createElement("canvas");
-  off.width = gw; off.height = gh;
-  const octx = off.getContext("2d");
-  const img = octx.createImageData(gw, gh);
-
-  const eps = 0.05; // m^2, avoids singularity at sensor positions
-  for (let j = 0; j < gh; j++) {
-    const vv = ((j + 0.5) * V) / gh;
-    for (let i = 0; i < gw; i++) {
-      const uu = ((i + 0.5) * U) / gw;
-      let num = 0, den = 0;
-      if (pts.length === 1) {
-        num = pts[0].t; den = 1;
-      } else {
-        for (const p of pts) {
-          const du = p.u - uu, dv = p.v - vv;
-          const w = 1 / (du * du + dv * dv + eps);
-          num += w * p.t; den += w;
-        }
-      }
-      const t = den ? num / den : cs.min;
-      const col = tempColor(t, cs.min, cs.max).match(/\d+/g).map(Number);
-      const o = (j * gw + i) * 4;
-      img.data[o] = col[0];
-      img.data[o + 1] = col[1];
-      img.data[o + 2] = col[2];
-      img.data[o + 3] = 255;
-    }
-  }
-  octx.putImageData(img, 0, 0);
-
-  ctx.clearRect(0, 0, W, H);
-  ctx.imageSmoothingEnabled = true;
-  ctx.imageSmoothingQuality = "high";
-  ctx.drawImage(off, 0, 0, W, H);
-
-  drawChrome(ctx, W, H, room, plane, scale);
-  return { W, H, scale };
-}
-
-function drawChrome(ctx, W, H, room, plane, scale) {
-  const { U, V } = planeOf(room, plane);
-
-  // 1 m reference grid.
-  ctx.strokeStyle = "rgba(11, 16, 21, 0.35)";
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  for (let m = 1; m < U; m++) { ctx.moveTo(m * scale, 0); ctx.lineTo(m * scale, H); }
-  for (let m = 1; m < V; m++) { ctx.moveTo(0, m * scale); ctx.lineTo(W, m * scale); }
-  ctx.stroke();
-
-  // Walls.
-  ctx.strokeStyle = "rgba(226, 232, 240, 0.85)";
-  ctx.lineWidth = 3;
-  ctx.strokeRect(1.5, 1.5, W - 3, H - 3);
-
-  // Door gap on the front wall.
-  const door = room.door;
-  if (door && door.x_m != null) {
-    const dw = (door.width_m || 1.2) * scale;
-    const dx = door.x_m * scale;
-    ctx.strokeStyle = "#0b1015";
-    ctx.lineWidth = 5;
-    ctx.beginPath();
-    if (plane === "wall") {
-      ctx.moveTo(dx, H - 2); ctx.lineTo(dx + dw, H - 2);
-    } else {
-      ctx.moveTo(dx, H - 2); ctx.lineTo(dx + dw, H - 2);
-    }
-    ctx.stroke();
-  }
-
-  // Meter tick labels along the top edge.
-  ctx.fillStyle = "rgba(226, 232, 240, 0.75)";
-  ctx.font = "10px ui-monospace, Menlo, Consolas, monospace";
-  for (let m = 1; m < U; m += 1) {
-    ctx.fillText(`${m}m`, m * scale + 3, 12);
-  }
-}
-
-/* Trend chart: one line per sensor, threshold bands, sparse mono axes. */
-const LINE_COLORS = ["#7dd3fc", "#fcd34d", "#86efac", "#fda4af", "#a5b4fc", "#f0abfc"];
-
-export function lineColor(i) {
-  return LINE_COLORS[i % LINE_COLORS.length];
-}
-
-export function drawChart(canvas, series, room, minutes, heightCss = 190) {
-  const wrap = canvas.parentElement.clientWidth || 600;
-  const Hcss = heightCss;
-  const dpr = window.devicePixelRatio || 1;
-  canvas.width = wrap * dpr;
-  canvas.height = Hcss * dpr;
-  const ctx = canvas.getContext("2d");
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.clearRect(0, 0, wrap, Hcss);
-
-  const padL = 44, padR = 12, padT = 10, padB = 24;
-  const iw = wrap - padL - padR, ih = Hcss - padT - padB;
-  const now = Date.now();
-  const t0 = now - minutes * 60000;
-
-  let lo = Infinity, hi = -Infinity;
-  for (const sid in series) {
-    for (const [, t] of series[sid]) {
-      if (t < lo) lo = t;
-      if (t > hi) hi = t;
-    }
-  }
-  const th = room.thresholds || {};
-  if (th.target_min != null) lo = Math.min(lo, th.target_min);
-  if (th.target_max != null) hi = Math.max(hi, th.target_max);
-  if (!isFinite(lo)) { lo = 0; hi = 5; }
-  const padY = Math.max((hi - lo) * 0.15, 0.5);
-  lo -= padY; hi += padY;
-
-  const X = ms => padL + ((ms - t0) / (now - t0)) * iw;
-  const Y = t => padT + ih - ((t - lo) / (hi - lo)) * ih;
-
-  // Horizontal gridlines.
-  ctx.font = "10px ui-monospace, Menlo, Consolas, monospace";
-  ctx.fillStyle = "rgba(143, 163, 181, 0.9)";
-  ctx.strokeStyle = "rgba(148, 163, 184, 0.12)";
-  ctx.lineWidth = 1;
-  for (let g = 0; g <= 4; g++) {
-    const tv = lo + ((hi - lo) * g) / 4;
-    const y = Y(tv);
-    ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(wrap - padR, y); ctx.stroke();
-    ctx.textAlign = "right";
-    ctx.fillText(tv.toFixed(1) + "\u00B0", padL - 6, y + 3);
-  }
-
-  // Threshold lines.
-  ctx.setLineDash([4, 4]);
-  for (const key of ["target_min", "target_max"]) {
-    if (th[key] == null) continue;
-    const y = Y(th[key]);
-    ctx.strokeStyle = "rgba(143, 163, 181, 0.45)";
-    ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(wrap - padR, y); ctx.stroke();
-  }
-  ctx.setLineDash([]);
-
-  // Time ticks: about 5.
-  const stepMs = (minutes * 60000) / 5;
-  ctx.textAlign = "center";
-  for (let i = 0; i <= 5; i++) {
-    const ms = t0 + stepMs * i;
-    const d = new Date(ms);
-    const hh = String(d.getHours()).padStart(2, "0");
-    const mm = String(d.getMinutes()).padStart(2, "0");
-    ctx.fillText(`${hh}:${mm}`, X(ms), Hcss - 8);
-  }
-
-  // Series lines.
-  let idx = 0;
-  for (const sid in series) {
-    const pts = series[sid].filter(([ms]) => ms >= t0 - stepMs);
-    if (pts.length < 2) { idx++; continue; }
-    ctx.strokeStyle = lineColor(idx);
-    ctx.lineWidth = 1.6;
-    ctx.beginPath();
-    pts.forEach(([ms, t], i) => {
-      const x = Math.max(padL, X(ms)), y = Y(t);
-      i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
-    });
-    ctx.stroke();
-    idx++;
-  }
-}
+export function cssTempColor(t, min, max) { return tempColor(t, min, max); }
 
 export function drawLegend(canvas, cfg) {
-  const cs = cfg.color_scale || { min: -25, max: 25 };
+  const cs = cfg.color_scale || { min: -10, max: 15 };
   const w = 340, h = 10;
   const dpr = window.devicePixelRatio || 1;
   canvas.width = w * dpr; canvas.height = h * dpr;
@@ -268,4 +40,224 @@ export function drawLegend(canvas, cfg) {
     ctx.fillStyle = tempColor(t, cs.min, cs.max);
     ctx.fillRect(x, 0, 1, h);
   }
+}
+
+const COS = Math.cos(Math.PI / 6);
+const SIN = Math.sin(Math.PI / 6);
+
+export function createModel3D(canvas) {
+  const ctx = canvas.getContext("2d");
+  let fieldSig = null;
+  let faceTex = null;
+  let particles = null;
+  let lastT = 0;
+  let markers = [];
+  let proj = (p) => p;
+
+  function makeField(room, readings) {
+    const pts = [];
+    for (const s of room.sensors || []) {
+      const r = readings[s.id];
+      if (!r || r.temp == null || isNaN(r.temp)) continue;
+      pts.push({ x: s.x_m, y: s.y_m, z: s.z_m ?? 0, t: r.temp });
+    }
+    if (pts.length === 0) return null;
+    if (pts.length === 1) { const c = pts[0]; return () => c.t; }
+    const eps = 0.02;
+    return (x, y, z) => {
+      let num = 0, den = 0;
+      for (const p of pts) {
+        const dx = p.x - x, dy = p.y - y, dz = p.z - z;
+        const wgt = 1 / (dx * dx + dy * dy + dz * dz + eps);
+        num += wgt * p.t; den += wgt;
+      }
+      return den ? num / den : 0;
+    };
+  }
+
+  function paintFace(cv, field, map, uMax, vMax, cs) {
+    const N = cv.width;
+    const octx = cv.getContext("2d");
+    const img = octx.createImageData(N, N);
+    for (let j = 0; j < N; j++) {
+      for (let i = 0; i < N; i++) {
+        const u = (i + 0.5) / N * uMax;
+        const v = (j + 0.5) / N * vMax;
+        const p = map(u, v);
+        const t = field ? field(p.x, p.y, p.z) : (cs.min + cs.max) / 2;
+        const m = tempColor(t, cs.min, cs.max).match(/\d+/g);
+        const o = (j * N + i) * 4;
+        img.data[o] = +m[0]; img.data[o + 1] = +m[1]; img.data[o + 2] = +m[2]; img.data[o + 3] = 255;
+      }
+    }
+    octx.putImageData(img, 0, 0);
+  }
+
+  function buildFaces(room, field, cs) {
+    const d = room.dims_m;
+    const N = 56;
+    const mk = () => { const c = document.createElement("canvas"); c.width = N; c.height = N; return c; };
+    const floor = mk(), wallL = mk(), wallR = mk();
+    paintFace(floor, field, (u, v) => ({ x: u, y: v, z: 0 }), d.length, d.width, cs);
+    paintFace(wallL, field, (u, v) => ({ x: u, y: 0, z: v }), d.length, d.height, cs);
+    paintFace(wallR, field, (u, v) => ({ x: d.length, y: u, z: v }), d.width, d.height, cs);
+    return { floor, wallL, wallR };
+  }
+
+  function initParticles(d) {
+    const arr = [];
+    const cx = d.length / 2, cy = d.width / 2;
+    for (let i = 0; i < 60; i++) {
+      arr.push({
+        theta: Math.random() * Math.PI * 2,
+        rad: 0.25 + Math.random() * 0.7,
+        speed: 0.25 + Math.random() * 0.45,
+        zph: Math.random() * Math.PI * 2,
+        zsp: 0.3 + Math.random() * 0.5,
+        cx, cy,
+        x: 0, y: 0, z: 0, px: 0, py: 0, pz: 0,
+      });
+    }
+    return arr;
+  }
+
+  function render(room, readings, cfg, selectedId, t) {
+    const dpr = window.devicePixelRatio || 1;
+    const cw = canvas.clientWidth || 600;
+    const chh = canvas.clientHeight || 420;
+    if (canvas.width !== Math.round(cw * dpr) || canvas.height !== Math.round(chh * dpr)) {
+      canvas.width = Math.round(cw * dpr); canvas.height = Math.round(chh * dpr);
+    }
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, cw, chh);
+    if (!room) return;
+    const d = room.dims_m;
+    const cs = cfg.color_scale || { min: -10, max: 15 };
+
+    const sig = room.id + "|" + (room.sensors || []).map(s => {
+      const r = readings[s.id];
+      return s.id + ":" + (r && r.temp != null ? Math.round(r.temp * 10) : "x");
+    }).join(",");
+    if (sig !== fieldSig || !faceTex) {
+      fieldSig = sig;
+      const field = makeField(room, readings);
+      faceTex = buildFaces(room, field, cs);
+      particles = initParticles(d);
+    }
+
+    const P = (x, y, z) => ({ x: (x - y) * COS * scale + ox, y: ((x + y) * SIN - z) * scale + oy });
+    // Bounds for auto-fit.
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    const corners = [
+      [0, 0, 0], [d.length, 0, 0], [d.length, d.width, 0], [0, d.width, 0],
+      [0, 0, d.height], [d.length, 0, d.height], [d.length, d.width, d.height], [0, d.width, d.height],
+    ];
+    for (const [x, y, z] of corners) {
+      const sx = (x - y) * COS, sy = (x + y) * SIN - z;
+      minX = Math.min(minX, sx); maxX = Math.max(maxX, sx);
+      minY = Math.min(minY, sy); maxY = Math.max(maxY, sy);
+    }
+    const pad = 22;
+    const scale = Math.min((cw - 2 * pad) / (maxX - minX), (chh - 2 * pad) / (maxY - minY));
+    const ox = cw / 2 - (minX + maxX) / 2 * scale;
+    const oy = chh / 2 - (minY + maxY) / 2 * scale;
+
+    const drawFace = (tex, A, B, D, alpha) => {
+      const N = tex.width;
+      const a = (B.x - A.x) / N, b = (B.y - A.y) / N, c = (D.x - A.x) / N, e = (D.y - A.y) / N;
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      ctx.transform(a, b, c, e, A.x, A.y);
+      ctx.drawImage(tex, 0, 0);
+      ctx.restore();
+      ctx.globalAlpha = 1;
+    };
+
+    const fA = P(0, 0, 0), fB = P(d.length, 0, 0), fD = P(0, d.width, 0);
+    const lA = P(0, 0, 0), lB = P(d.length, 0, 0), lD = P(0, 0, d.height);
+    const rA = P(d.length, 0, 0), rB = P(d.length, d.width, 0), rD = P(d.length, 0, d.height);
+    drawFace(faceTex.floor, fA, fB, fD, 0.95);
+    drawFace(faceTex.wallL, lA, lB, lD, 0.45);
+    drawFace(faceTex.wallR, rA, rB, rD, 0.45);
+
+    // Wireframe edges.
+    const pe = corners.map(([x, y, z]) => P(x, y, z));
+    const edges = [[0, 1], [1, 2], [2, 3], [3, 0], [4, 5], [5, 6], [6, 7], [7, 4], [0, 4], [1, 5], [2, 6], [3, 7]];
+    ctx.strokeStyle = "rgba(226,232,240,0.7)";
+    ctx.lineWidth = 1.4;
+    ctx.beginPath();
+    for (const [i, j] of edges) { ctx.moveTo(pe[i].x, pe[i].y); ctx.lineTo(pe[j].x, pe[j].y); }
+    ctx.stroke();
+
+    // Door gap on the front-bottom edge (corner 3 -> 2, y = width).
+    const door = room.door;
+    if (door && door.x_m != null) {
+      const a = P(door.x_m, d.width, 0), b = P(door.x_m + (door.width_m || 1.2), d.width, 0);
+      ctx.strokeStyle = "rgba(11,16,21,0.9)";
+      ctx.lineWidth = 4;
+      ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+    }
+
+    // Flowing air particles.
+    const dt = Math.min(0.05, lastT ? t - lastT : 0.016);
+    lastT = t;
+    if (!particles) particles = initParticles(d);
+    const field = makeField(room, readings);
+    for (const p of particles) {
+      p.px = p.x; p.py = p.y; p.pz = p.z;
+      p.theta += p.speed * dt;
+      p.zph += p.zsp * dt;
+      p.x = p.cx + p.rad * d.length * 0.5 * Math.cos(p.theta);
+      p.y = p.cy + p.rad * d.width * 0.5 * Math.sin(p.theta);
+      p.z = d.height * (0.5 + 0.42 * Math.sin(p.zph));
+      const from = P(p.px, p.py, p.pz), to = P(p.x, p.y, p.z);
+      const lt = field ? field(p.x, p.y, p.z) : (cs.min + cs.max) / 2;
+      const m = tempColor(lt, cs.min, cs.max).match(/\d+/g);
+      ctx.strokeStyle = `rgba(${m[0]},${m[1]},${m[2]},0.28)`;
+      ctx.lineWidth = 1.2;
+      ctx.beginPath(); ctx.moveTo(from.x, from.y); ctx.lineTo(to.x, to.y); ctx.stroke();
+      ctx.fillStyle = `rgba(${m[0]},${m[1]},${m[2]},0.5)`;
+      ctx.beginPath(); ctx.arc(to.x, to.y, 1.3, 0, Math.PI * 2); ctx.fill();
+    }
+
+    // Sensor markers.
+    markers = [];
+    (room.sensors || []).forEach(s => {
+      const pr = P(s.x_m, s.y_m, s.z_m ?? 0);
+      const r = readings[s.id];
+      const stale = !r || r.time == null || (Date.now() - r.time) > ((cfg.stale_after_s || 15) * 1000);
+      const col = stale ? "#8fa3b5" : tempColor(r.temp, cs.min, cs.max);
+      const pulse = 1 + 0.18 * Math.sin(t * 3 + (s.x_m + s.y_m));
+      const rad = 7 * pulse;
+      const g = ctx.createRadialGradient(pr.x, pr.y, 1, pr.x, pr.y, rad * 2.4);
+      g.addColorStop(0, col);
+      g.addColorStop(1, "rgba(0,0,0,0)");
+      ctx.fillStyle = g;
+      ctx.beginPath(); ctx.arc(pr.x, pr.y, rad * 2.4, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = col;
+      ctx.beginPath(); ctx.arc(pr.x, pr.y, rad * 0.55, 0, Math.PI * 2); ctx.fill();
+      if (selectedId === s.id) {
+        ctx.strokeStyle = "#7dd3fc"; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.arc(pr.x, pr.y, rad + 4, 0, Math.PI * 2); ctx.stroke();
+      }
+      ctx.fillStyle = "rgba(226,232,240,0.95)";
+      ctx.font = "11px ui-monospace, Menlo, Consolas, monospace";
+      ctx.textAlign = "left";
+      const label = `${s.label} ${stale ? "--.-" : r.temp.toFixed(1)}°`;
+      ctx.fillText(label, pr.x + rad + 6, pr.y - rad - 2);
+      markers.push({ id: s.id, x: pr.x, y: pr.y, r: rad + 6 });
+    });
+  }
+
+  function pick(x, y) {
+    let best = null, bestD = Infinity;
+    for (const m of markers) {
+      const dx = x - m.x, dy = y - m.y;
+      const dist = dx * dx + dy * dy;
+      if (dist < m.r * m.r && dist < bestD) { best = m.id; bestD = dist; }
+    }
+    return best;
+  }
+
+  return { render, pick };
 }

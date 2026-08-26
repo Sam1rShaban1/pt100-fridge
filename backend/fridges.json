@@ -13,7 +13,7 @@
     "  - 'f1_rear' is a demo slot: publish a test reading to it (see README)",
     "    to preview the heat gradient before physical sensor 2 is installed."
   ],
-  "color_scale": { "min": -25, "max": 25 },
+  "color_scale": { "min": -10, "max": 15 },
   "stale_after_s": 15,
   "rooms": [
     {
