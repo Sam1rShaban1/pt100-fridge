@@ -1,0 +1,52 @@
+# Local testing override (no domain / no public TLS) — tuned for ARM64 (Raspberry Pi).
+# Usage:
+#   docker compose up -d          (override auto-merged, no flags needed)
+# Then reach:
+#   Grafana    http://<pi-ip>:3000
+#   OTA server http://<pi-ip>:8010
+# Caddy (public TLS / Let's Encrypt) is disabled here because it needs a
+# public domain + ports 80/443.
+# platform: linux/arm64 is pinned because Docker's default "arm/v8" guess
+# fails to resolve some multi-arch manifests (e.g. influxdb:3-core) on the Pi.
+# security_opt: seccomp=unconfined is required because the stock Docker seccomp
+# profile blocks a syscall these images need on this kernel (containers exit 159
+# / SIGSYS). Acceptable for a trusted LAN device; tighten later if exposed.
+services:
+  caddy:
+    profiles: ["disabled"]
+
+  influxdb3:
+    platform: linux/arm64
+    security_opt:
+      - seccomp=unconfined
+
+  influxdb-init:
+    platform: linux/arm64
+    security_opt:
+      - seccomp=unconfined
+
+  mosquitto:
+    platform: linux/arm64
+    security_opt:
+      - seccomp=unconfined
+
+  telegraf:
+    platform: linux/arm64
+    security_opt:
+      - seccomp=unconfined
+
+  grafana:
+    platform: linux/arm64
+    ports:
+      - "3000:3000"
+    security_opt:
+      - seccomp=unconfined
+
+  ota-server:
+    # NOTE: do NOT pin platform here. A platform pin on an ota-server build
+    # makes BuildKit run `RUN pip install` in a mode that fails on the Pi (159).
+    # ota-server builds natively on arm64 without it.
+    ports:
+      - "8010:8000"
+    security_opt:
+      - seccomp=unconfined
