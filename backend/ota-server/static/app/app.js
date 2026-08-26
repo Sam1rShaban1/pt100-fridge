@@ -1,7 +1,7 @@
 /* Veze Sharri cold-chain dashboard.
-   Shell: top bar / main room view + right room sidebar / bottom bar with one
-   trend chart per sensor. */
-import { drawField, drawChart, drawLegend, lineColor, planeOf, sensorUV, cssTempColor } from "./viz.js";
+   Shell: top bar / main room view + right sidebar (rooms -> sensors tree)
+   / bottom bar with one trend chart per sensor. */
+import { drawField, drawChart, drawLegend, planeOf, sensorUV, cssTempColor } from "./viz.js";
 
 const $ = s => document.querySelector(s);
 const fmt1 = t => (t == null || isNaN(t)) ? "--.-" : Number(t).toFixed(1);
@@ -16,6 +16,9 @@ const state = {
   selectedSensor: null,
   seriesCache: {},     // sid -> [[ms,temp],...]
 };
+
+const expanded = new Set();   // room ids with open sensor tree
+let pendingScroll = null;
 
 async function api(path) {
   const r = await fetch(path);
@@ -109,23 +112,70 @@ function refresh() {
   updateRoomLive();
 }
 
-/* ---------------- sidebar ---------------- */
+/* ---------------- sidebar: rooms -> sensors tree ---------------- */
 
 function renderSidebar() {
   const nav = $("#room-list");
   nav.innerHTML = "";
   for (const room of state.cfg.rooms) {
+    const group = document.createElement("div");
+
     const btn = document.createElement("button");
     btn.className = "room-item";
     btn.dataset.room = room.id;
     btn.setAttribute("aria-label", `${room.name}, open`);
+    btn.innerHTML = `
+      <span class="chev" aria-hidden="true"></span>
+      <span class="ri-status empty" aria-hidden="true"></span>
+      <span class="ri-name">${escapeHtml(room.name)}</span>
+      <span class="ri-temp num"></span>`;
     btn.addEventListener("click", () => { location.hash = `#/room/${room.id}`; });
-    nav.appendChild(btn);
+
+    // Chevron alone just toggles the dropdown without navigating.
+    btn.querySelector(".chev").addEventListener("click", e => {
+      e.stopPropagation();
+      expanded.has(room.id) ? expanded.delete(room.id) : expanded.add(room.id);
+      applyExpand();
+    });
+
+    const tree = document.createElement("div");
+    tree.className = "sensor-tree";
+    tree.dataset.tree = room.id;
+    tree.style.display = "none";
+    for (const s of room.sensors || []) {
+      const sb = document.createElement("button");
+      sb.className = "tree-sensor";
+      sb.dataset.sensor = s.id;
+      sb.innerHTML = `
+        <span class="ts-dot" aria-hidden="true"></span>
+        <span class="ts-name">${escapeHtml(s.label)}</span>
+        <span class="ts-temp num"></span>`;
+      sb.title = `Show ${s.label}`;
+      sb.addEventListener("click", () => selectSensor(room.id, s.id));
+      tree.appendChild(sb);
+    }
+    if (!(room.sensors || []).length) {
+      const p = document.createElement("p");
+      p.className = "tree-empty";
+      p.textContent = "No sensors";
+      tree.appendChild(p);
+    }
+
+    group.append(btn, tree);
+    nav.appendChild(group);
   }
   updateSidebar();
 }
 
+function applyExpand() {
+  document.querySelectorAll(".room-item[data-room]").forEach(b =>
+    b.classList.toggle("open", expanded.has(b.dataset.room)));
+  document.querySelectorAll(".sensor-tree[data-tree]").forEach(t =>
+    t.style.display = expanded.has(t.dataset.tree) ? "block" : "none");
+}
+
 function updateSidebar() {
+  const cs = state.cfg.color_scale;
   for (const room of state.cfg.rooms) {
     const btn = document.querySelector(`.room-item[data-room="${room.id}"]`);
     if (!btn) continue;
@@ -133,10 +183,24 @@ function updateSidebar() {
     const temps = roomTemps(room).filter(p => !isStale(p.id));
     const avg = temps.length ? temps.reduce((a, p) => a + p.temp, 0) / temps.length : null;
     const st = statusOf(room);
-    btn.innerHTML = `
-      <span class="ri-status ${st}" aria-hidden="true"></span>
-      <span class="ri-name">${escapeHtml(room.name)}</span>
-      <span class="ri-temp num">${fmt1(avg)}°</span>`;
+    btn.querySelector(".ri-status").className = `ri-status ${st}`;
+    btn.querySelector(".ri-temp").textContent = `${fmt1(avg)}°`;
+    btn.querySelector(".ri-temp").style.color =
+      avg != null ? cssTempColor(avg, cs.min, cs.max) : "var(--mut)";
+
+    // Per-sensor tree rows.
+    for (const s of room.sensors || []) {
+      const row = document.querySelector(`.tree-sensor[data-sensor="${s.id}"]`);
+      if (!row) continue;
+      const r = state.latest[s.id];
+      const stale = isStale(s.id);
+      row.classList.toggle("stale", stale);
+      row.classList.toggle("selected", state.selectedSensor === s.id);
+      const col = !stale && r?.temp != null
+        ? cssTempColor(r.temp, cs.min, cs.max) : "var(--mut)";
+      row.querySelector(".ts-dot").style.background = col;
+      row.querySelector(".ts-temp").textContent = `${fmt1(r?.temp)}°`;
+    }
   }
 }
 
@@ -149,11 +213,32 @@ function roomTemps(room) {
   return out;
 }
 
+function selectSensor(roomId, sid) {
+  state.selectedSensor = state.selectedSensor === sid ? null : sid;
+  expanded.add(roomId);
+  if (state.routeId !== roomId) {
+    pendingScroll = sid;
+    location.hash = `#/room/${roomId}`;
+  } else {
+    updateSidebar();
+    updateRoomLive();
+    paintBottomBar(currentRoom());
+    scrollCell(sid);
+  }
+}
+
+function scrollCell(sid) {
+  const cell = document.querySelector(`[data-cell="${sid}"]`);
+  if (cell) cell.scrollIntoView({ behavior: "smooth", inline: "nearest", block: "nearest" });
+}
+
 /* ---------------- routing ---------------- */
 
 function currentRoom() {
   return state.cfg.rooms.find(r => r.id === state.routeId);
 }
+
+let chartTimer = null;
 
 function renderRoute() {
   clearInterval(chartTimer);
@@ -163,13 +248,13 @@ function renderRoute() {
   state.routeId = (m && state.cfg.rooms.some(r => r.id === m[1]))
     ? m[1]
     : (state.cfg.rooms[0]?.id ?? null);
+  if (state.routeId) expanded.add(state.routeId);
   renderMain();
+  applyExpand();
   updateSidebar();
 }
 
 /* ---------------- main area ---------------- */
-
-let chartTimer = null;
 
 function renderMain() {
   const view = $("#view");
@@ -177,7 +262,7 @@ function renderMain() {
   state.selectedSensor = null;
   if (!room) {
     view.innerHTML = `<p class="empty-note">No rooms configured in fridges.json</p>`;
-    $("#bottombar").innerHTML = "";
+    $("#bottombar").innerHTML = `<p class="bb-empty">No rooms configured.</p>`;
     return;
   }
   const d = room.dims_m;
@@ -231,6 +316,11 @@ function renderMain() {
   loadCharts();
   chartTimer = setInterval(loadCharts, 15000);
   updateRoomLive(true);
+
+  if (pendingScroll) {
+    scrollCell(pendingScroll);
+    pendingScroll = null;
+  }
 }
 
 /* ---------------- bottom bar: one chart per sensor ---------------- */
@@ -265,19 +355,20 @@ async function loadCharts() {
 }
 
 function paintBottomBar(room) {
-  const th = room.thresholds || {};
+  const cs = state.cfg.color_scale;
   for (const s of room.sensors || []) {
     const cell = document.querySelector(`[data-cell="${s.id}"]`);
     if (!cell) continue;
+    cell.classList.toggle("selected", state.selectedSensor === s.id);
     const canvas = cell.querySelector("canvas");
-    drawChart(canvas, { [s.id]: state.seriesCache[s.id] || [] }, room, state.rangeMin, canvas.clientHeight || 130);
+    drawChart(canvas, { [s.id]: state.seriesCache[s.id] || [] }, room, state.rangeMin,
+      canvas.clientHeight || 130);
     const r = state.latest[s.id];
     const stale = isStale(s.id);
     const el = cell.querySelector(".cc-temp");
     el.textContent = `${stale ? "--.-" : fmt1(r?.temp)}°C`;
     el.style.color = !stale && r?.temp != null
-      ? cssTempColor(r.temp, state.cfg.color_scale.min, state.cfg.color_scale.max)
-      : "var(--mut)";
+      ? cssTempColor(r.temp, cs.min, cs.max) : "var(--mut)";
   }
 }
 
@@ -342,7 +433,9 @@ function updateRoomLive(full = false) {
       <div class="sdot-label num">${escapeHtml(s.label)} ${fmt1(r?.temp)}°C</div>`;
     el.addEventListener("click", () => {
       state.selectedSensor = state.selectedSensor === s.id ? null : s.id;
+      updateSidebar();
       updateRoomLive();
+      paintBottomBar(room);
     });
     dots.appendChild(el);
   }
@@ -370,23 +463,17 @@ function updateRoomLive(full = false) {
         <span>${age == null ? "no data" : stale ? `stale ${age}s` : `${age}s ago`}</span>
         <span class="${r?.fault ? "fault-flag" : ""}">${r?.fault ? "FAULT" : "ok"}</span>
       </div>`;
-    row.addEventListener("click", () => {
-      state.selectedSensor = state.selectedSensor === s.id ? null : s.id;
-      updateRoomLive();
-    });
+    row.addEventListener("click", () => selectSensor(room.id, s.id));
     list.appendChild(row);
   });
-
-  paintBottomBar(room);
 }
 
 window.addEventListener("resize", () => {
-  const room = currentRoom();
-  if (!room) return;
   clearTimeout(window.__rz);
   window.__rz = setTimeout(() => {
     updateRoomLive(true);
-    paintBottomBar(room);
+    const room = currentRoom();
+    if (room) paintBottomBar(room);
   }, 150);
 });
 
