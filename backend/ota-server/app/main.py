@@ -149,9 +149,6 @@ def start_rollout(version, group, canary):
     }
 
 
-mqtt_init(_on_mqtt, _on_pt100)
-
-
 # ---------------- sensor data API ----------------
 FRIDGES_CONFIG = Path(
     os.environ.get(
@@ -227,6 +224,9 @@ def _on_pt100(topic: str, payload: bytes):
             _sse_loop.call_soon_threadsafe(_q_put, q, evt)
         except RuntimeError:
             pass
+
+
+mqtt_init(_on_mqtt, _on_pt100)
 
 
 @app.get("/api/stream")
