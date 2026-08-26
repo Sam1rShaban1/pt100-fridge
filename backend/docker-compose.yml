@@ -95,6 +95,7 @@ services:
     build: ./ota-server
     depends_on:
       - mosquitto
+      - influxdb3
     environment:
       MQTT_BROKER: mosquitto
       MQTT_PORT: "1883"
@@ -104,10 +105,15 @@ services:
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL}
       OTA_ADMIN_TOKEN: ${OTA_ADMIN_TOKEN}
       DEVICE_GROUPS: ${DEVICE_GROUPS}
+      INFLUX_URL: http://influxdb3:8181
+      INFLUX_DB: ${INFLUXDB_DATABASE}
+      INFLUX_TOKEN: ${INFLUX_TOKEN}
+      FRIDGES_CONFIG: /data/fridges.json
     ports:
       - "8010:8000"
     volumes:
       - ota_data:/data
+      - ./fridges.json:/data/fridges.json:ro
     restart: unless-stopped
 
 volumes:

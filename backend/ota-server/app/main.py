@@ -1,11 +1,13 @@
 import os
 import json
+import time
+import asyncio
 import hashlib
 import threading
 from pathlib import Path
 
 from fastapi import FastAPI, UploadFile, File, Form, Request, HTTPException, Response
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 import uvicorn
@@ -18,6 +20,7 @@ from app.store import (
     upsert_device,
     get_all_devices,
 )
+from app.influx import query_latest, query_history
 from app.mqtt_client import init as mqtt_init, publish
 
 FIRMWARE_DIR = Path(os.environ.get("FIRMWARE_DIR", "/data/firmware"))
@@ -146,7 +149,113 @@ def start_rollout(version, group, canary):
     }
 
 
-mqtt_init(_on_mqtt)
+mqtt_init(_on_mqtt, _on_pt100)
+
+
+# ---------------- sensor data API ----------------
+FRIDGES_CONFIG = Path(
+    os.environ.get(
+        "FRIDGES_CONFIG",
+        str(Path(__file__).parent.parent / "fridges.json"),
+    )
+)
+
+
+def load_rooms():
+    """Read fridges.json on every call so edits apply without a restart."""
+    try:
+        return json.loads(FRIDGES_CONFIG.read_text())
+    except Exception:
+        return {"color_scale": {"min": -25, "max": 25}, "stale_after_s": 15, "rooms": []}
+
+
+def _room_sensor_ids(cfg):
+    ids = []
+    for room in cfg.get("rooms", []):
+        for s in room.get("sensors", []):
+            if s.get("id"):
+                ids.append(s["id"])
+    return ids
+
+
+@app.get("/api/fridges")
+def fridges():
+    return load_rooms()
+
+
+@app.get("/api/readings/latest")
+def readings_latest():
+    cfg = load_rooms()
+    return {"readings": query_latest(_room_sensor_ids(cfg))}
+
+
+@app.get("/api/readings/history")
+def readings_history(sensors: str = "", minutes: int = 60, points: int = 90):
+    ids = [s.strip() for s in sensors.split(",") if s.strip()]
+    if not ids:
+        ids = _room_sensor_ids(load_rooms())
+    return {"series": query_history(ids, minutes, points)}
+
+
+# ---------------- live stream (SSE) ----------------
+_sse_clients = set()
+_sse_loop = None
+
+
+def _q_put(q, item):
+    if q.qsize() < 200:
+        q.put_nowait(item)
+
+
+def _on_pt100(topic: str, payload: bytes):
+    sid = topic.split("/")[-1]
+    try:
+        data = json.loads(payload)
+    except Exception:
+        return
+    evt = {
+        "sensor_id": sid,
+        "temp": data.get("temp"),
+        "resistance": data.get("resistance"),
+        "fault": data.get("fault"),
+        "time": int(time.time() * 1000),
+    }
+    if _sse_loop is None:
+        return
+    for q in tuple(_sse_clients):
+        try:
+            _sse_loop.call_soon_threadsafe(_q_put, q, evt)
+        except RuntimeError:
+            pass
+
+
+@app.get("/api/stream")
+async def stream(req: Request):
+    global _sse_loop
+    _sse_loop = asyncio.get_running_loop()
+    q = asyncio.Queue(maxsize=200)
+    _sse_clients.add(q)
+
+    async def gen():
+        try:
+            yield "retry: 3000\n\n"
+            while True:
+                if await req.is_disconnected():
+                    break
+                try:
+                    evt = await asyncio.wait_for(q.get(), timeout=15)
+                except asyncio.TimeoutError:
+                    yield ": keepalive\n\n"
+                    continue
+                yield f"data: {json.dumps(evt)}\n\n"
+        finally:
+            _sse_clients.discard(q)
+
+    return StreamingResponse(
+        gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 # ---------------- endpoints ----------------
@@ -220,6 +329,13 @@ app.mount(
     "/firmware",
     StaticFiles(directory=str(FIRMWARE_DIR), check_dir=False),
     name="firmware",
+)
+
+_DASHBOARD_DIR = Path(__file__).parent.parent / "static" / "app"
+app.mount(
+    "/app",
+    StaticFiles(directory=str(_DASHBOARD_DIR), html=True),
+    name="dashboard",
 )
 
 

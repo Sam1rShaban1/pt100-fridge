@@ -1,0 +1,57 @@
+{
+  "_comment": [
+    "Cold-room registry for the dashboard. Edit freely; the ota-server re-reads",
+    "this file on every API call, no restart needed.",
+    "",
+    "Sensor rules:",
+    "  - 'id' MUST equal the MQTT topic suffix the firmware publishes to",
+    "    (topic = pt100/<id>, set by SENSOR_DEFS in firmware/src/config.h).",
+    "  - Ids must be globally unique across ALL rooms.",
+    "  - Coordinates are meters inside the room: x along the length, y along",
+    "    the width, z up from the floor.",
+    "  - 'fridge_top' is the live sensor publishing from fridge-001 today.",
+    "  - 'f1_rear' is a demo slot: publish a test reading to it (see README)",
+    "    to preview the heat gradient before physical sensor 2 is installed."
+  ],
+  "color_scale": { "min": -25, "max": 25 },
+  "stale_after_s": 15,
+  "rooms": [
+    {
+      "id": "chiller-1",
+      "name": "Chiller 1",
+      "zone": "zone_a",
+      "type": "chiller",
+      "dims_m": { "length": 8.0, "width": 4.5, "height": 2.25 },
+      "thresholds": { "target_min": 0.0, "target_max": 4.0, "warn": 6.0, "alarm": 8.0 },
+      "door": { "x_m": 0.6, "width_m": 1.4 },
+      "sensors": [
+        { "id": "fridge_top", "label": "Sensor 1", "x_m": 2.0, "y_m": 2.2, "z_m": 2.0 },
+        { "id": "f1_rear", "label": "Sensor 2", "x_m": 6.0, "y_m": 2.2, "z_m": 2.0 }
+      ]
+    },
+    {
+      "id": "chiller-2",
+      "name": "Chiller 2",
+      "zone": "zone_a",
+      "type": "chiller",
+      "dims_m": { "length": 8.0, "width": 4.5, "height": 2.25 },
+      "thresholds": { "target_min": 0.0, "target_max": 4.0, "warn": 6.0, "alarm": 8.0 },
+      "door": { "x_m": 0.6, "width_m": 1.4 },
+      "sensors": [
+        { "id": "f2_top", "label": "Sensor 1", "x_m": 4.0, "y_m": 2.2, "z_m": 2.0 }
+      ]
+    },
+    {
+      "id": "chiller-3",
+      "name": "Chiller 3",
+      "zone": "zone_b",
+      "type": "chiller",
+      "dims_m": { "length": 8.0, "width": 4.5, "height": 2.25 },
+      "thresholds": { "target_min": 0.0, "target_max": 4.0, "warn": 6.0, "alarm": 8.0 },
+      "door": { "x_m": 0.6, "width_m": 1.4 },
+      "sensors": [
+        { "id": "f3_top", "label": "Sensor 1", "x_m": 4.0, "y_m": 2.2, "z_m": 2.0 }
+      ]
+    }
+  ]
+}
