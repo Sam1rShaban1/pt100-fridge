@@ -64,7 +64,8 @@ export function drawField(canvas, room, plane, readings, cfg) {
   const H = Math.round(V * scale);
   const dpr = window.devicePixelRatio || 1;
 
-  canvas.style.aspectRatio = `${U} / ${V}`;
+  canvas.style.width = W + "px";
+  canvas.style.height = H + "px";
   canvas.width = W * dpr;
   canvas.height = H * dpr;
   canvas.getContext("2d").setTransform(dpr, 0, 0, dpr, 0, 0);

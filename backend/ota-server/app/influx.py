@@ -45,6 +45,9 @@ def _query(sql):
         req.add_header("Authorization", "Bearer " + TOKEN)
     with urllib.request.urlopen(req, timeout=10) as r:
         payload = json.loads(r.read().decode())
+    # InfluxDB 3 Core returns a bare array of row objects for format=json.
+    if isinstance(payload, list):
+        return payload
     rows = []
     for table in payload.get("tables", []):
         recs = table.get("records")

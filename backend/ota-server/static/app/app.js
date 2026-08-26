@@ -1,501 +1,498 @@
-/* Veze Sharri cold-chain dashboard.
-   Shell: top bar / main room view + right sidebar (rooms -> sensors tree)
-   / bottom bar with one trend chart per sensor. */
-import { drawField, drawChart, drawLegend, planeOf, sensorUV, cssTempColor } from "./viz.js";
+import { cssTempColor, heatColor, drawField, drawLegend, planeOf, sensorUV, fmt1 } from "./viz.js";
 
-const $ = s => document.querySelector(s);
-const fmt1 = t => (t == null || isNaN(t)) ? "--.-" : Number(t).toFixed(1);
+const $ = (s, r = document) => r.querySelector(s);
+const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+const escapeHtml = (s) => String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
-const state = {
-  cfg: { rooms: [], color_scale: { min: -25, max: 25 }, stale_after_s: 15 },
-  latest: {},          // sid -> {temp, resistance, fault, time(ms)}
-  conn: "connecting",  // connecting | live | polling | down
-  routeId: null,
-  rangeMin: 60,
-  plane: "floor",
-  selectedSensor: null,
-  seriesCache: {},     // sid -> [[ms,temp],...]
+const UP = window.uPlot;
+const AXIS = "rgba(176,190,197,0.55)";
+const GRID = "rgba(255,255,255,0.05)";
+const FONT = "11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
+
+const LINE_COLORS = [
+  "#38bdf8", "#f59e0b", "#34d399", "#a78bfa",
+  "#fb7185", "#22d3ee", "#facc15", "#f472b6",
+];
+
+const PLANES = {
+  floor: { label: "Floor", long: "Floor plan (top view)" },
+  side: { label: "Side", long: "Side elevation (front view)" },
 };
 
-const expanded = new Set();   // room ids with open sensor tree
-let pendingScroll = null;
+const MINUTES = [
+  { v: 30, label: "30m" },
+  { v: 60, label: "1h" },
+  { v: 360, label: "6h" },
+  { v: 1440, label: "24h" },
+];
 
-async function api(path) {
-  const r = await fetch(path);
-  if (!r.ok) throw new Error(`${path} -> ${r.status}`);
+const state = {
+  fridges: [],
+  cfg: null,
+  latest: {},
+  plane: "floor",
+  rangeMin: 60,
+  selectedRoom: null,
+  selectedSensor: null,
+  openRooms: new Set(),
+  charts: new Map(),
+  liveQueue: new Map(),
+  livePending: false,
+  lastNet: 0,
+  lastPoll: 0,
+  connected: false,
+  sse: null,
+  observers: new Map(),
+};
+
+const netLabel = (s) => ({ ok: "Live", connecting: "Connecting", down: "Reconnecting", stale: "Stale" }[s] || s);
+const fmtAge = (ms) => {
+  if (ms == null) return "no data";
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s}s ago`;
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+  return `${Math.floor(s / 86400)}d ago`;
+};
+const isStale = (id) => {
+  const r = state.latest[id];
+  const after = (state.cfg && state.cfg.stale_after_s) || 15;
+  return !r || !r.time || (Date.now() - r.time) > after * 1000;
+};
+
+async function api(url, init) {
+  const r = await fetch(url, init);
+  if (!r.ok) throw new Error(`${url} -> ${r.status}`);
   return r.json();
 }
 
-/* ---------------- staleness + status ---------------- */
-
-function isStale(sid) {
-  const r = state.latest[sid];
-  if (!r || !r.time) return true;
-  return Date.now() - r.time > (state.cfg.stale_after_s || 15) * 1000;
-}
-
-function statusOf(room) {
-  const ss = room.sensors || [];
-  if (!ss.length) return "empty";
-  const th = room.thresholds || {};
-  let worst = "ok";
-  let anyData = false;
-  let anyFresh = false;
-  for (const s of ss) {
-    const r = state.latest[s.id];
-    if (!r) continue;
-    anyData = true;
-    if (!isStale(s.id)) anyFresh = true;
-    if (r.fault) return "alarm";
-    if (th.alarm != null && r.temp != null && r.temp >= th.alarm) return "alarm";
-    if (th.warn != null && r.temp != null && r.temp >= th.warn) worst = "warn";
-  }
-  if (!anyData) return "empty";
-  if (!anyFresh) return "offline";
-  return worst;
-}
-
-/* ---------------- connection handling ---------------- */
-
-let es = null, pollTimer = null, lastEvt = 0;
-
-function setConn(mode) {
-  state.conn = mode;
-  const el = $("#conn");
-  el.className = `conn ${mode === "connecting" ? "" : mode}`;
-  $("#conn-label").textContent =
-    mode === "live" ? "Live"
-      : mode === "polling" ? "Polling"
-        : mode === "down" ? "Offline"
-          : "Connecting";
-}
-
-function openStream() {
-  try { es = new EventSource("/api/stream"); } catch { return; }
-  es.onopen = () => setConn("live");
-  es.onerror = () => { if (state.conn !== "live") setConn("polling"); };
-  es.onmessage = e => {
-    lastEvt = Date.now();
-    try {
-      const d = JSON.parse(e.data);
-      if (d.sensor_id) {
-        state.latest[d.sensor_id] = d;
-        scheduleRefresh();
-      }
-    } catch { /* ignore malformed */ }
-  };
-  pollTimer = setInterval(async () => {
-    if (Date.now() - lastEvt < 12000 && state.conn === "live") return;
-    try {
-      const d = await api("/api/readings/latest");
-      state.latest = { ...state.latest, ...d.readings };
-      if (state.conn !== "down") setConn("polling");
-      scheduleRefresh();
-    } catch { setConn("down"); }
-  }, 5000);
-}
-
-/* ---------------- throttled repaint ---------------- */
-
-let refreshQueued = false;
-function scheduleRefresh() {
-  if (refreshQueued) return;
-  refreshQueued = true;
-  requestAnimationFrame(() => {
-    refreshQueued = false;
-    refresh();
-  });
-}
-
-function refresh() {
-  updateSidebar();
-  updateRoomLive();
-}
-
-/* ---------------- sidebar: rooms -> sensors tree ---------------- */
-
-function renderSidebar() {
-  const nav = $("#room-list");
-  nav.innerHTML = "";
-  for (const room of state.cfg.rooms) {
-    const group = document.createElement("div");
-
+function buildSidebar() {
+  const wrap = $("#room-list");
+  wrap.innerHTML = "";
+  state.openRooms = new Set(state.fridges.map(f => f.id));
+  state.fridges.forEach(room => {
+    const open = state.openRooms.has(room.id);
+    const active = state.selectedRoom === room.id;
+    const li = document.createElement("div");
+    li.className = "room-block";
     const btn = document.createElement("button");
-    btn.className = "room-item";
-    btn.dataset.room = room.id;
-    btn.setAttribute("aria-label", `${room.name}, open`);
-    btn.innerHTML = `
-      <span class="chev" aria-hidden="true"></span>
-      <span class="ri-status empty" aria-hidden="true"></span>
-      <span class="ri-name">${escapeHtml(room.name)}</span>
-      <span class="ri-temp num"></span>`;
-    btn.addEventListener("click", () => { location.hash = `#/room/${room.id}`; });
-
-    // Chevron alone just toggles the dropdown without navigating.
-    btn.querySelector(".chev").addEventListener("click", e => {
-      e.stopPropagation();
-      expanded.has(room.id) ? expanded.delete(room.id) : expanded.add(room.id);
-      applyExpand();
+    btn.className = "room-item" + (open ? " open" : "") + (active ? " active" : "");
+    btn.innerHTML = `<span class="chev" aria-hidden="true"></span><span class="room-name">${escapeHtml(room.name)}</span>`;
+    btn.setAttribute("aria-expanded", open ? "true" : "false");
+    btn.addEventListener("click", () => {
+      if (state.selectedRoom === room.id) {
+        state.openRooms.has(room.id) ? state.openRooms.delete(room.id) : state.openRooms.add(room.id);
+      } else {
+        state.selectedRoom = room.id;
+        state.openRooms.add(room.id);
+        renderView();
+        return;
+      }
+      updateSidebar();
     });
+    li.appendChild(btn);
 
     const tree = document.createElement("div");
     tree.className = "sensor-tree";
-    tree.dataset.tree = room.id;
-    tree.style.display = "none";
-    for (const s of room.sensors || []) {
-      const sb = document.createElement("button");
-      sb.className = "tree-sensor";
-      sb.dataset.sensor = s.id;
-      sb.innerHTML = `
-        <span class="ts-dot" aria-hidden="true"></span>
-        <span class="ts-name">${escapeHtml(s.label)}</span>
-        <span class="ts-temp num"></span>`;
-      sb.title = `Show ${s.label}`;
-      sb.addEventListener("click", () => selectSensor(room.id, s.id));
-      tree.appendChild(sb);
+    tree.hidden = !open;
+    const sensors = room.sensors || [];
+    if (sensors.length === 0) {
+      tree.innerHTML = `<div class="tree-empty">No sensors assigned</div>`;
+    } else {
+      sensors.forEach(s => {
+        const r = state.latest[s.id];
+        const stale = isStale(s.id);
+        const sb = document.createElement("button");
+        sb.className = "tree-sensor" + (state.selectedSensor === s.id ? " selected" : "") + (stale ? " stale" : "");
+        const dotColor = stale ? "var(--mut)" : cssTempColor(r?.temp, state.cfg.color_scale.min, state.cfg.color_scale.max);
+        sb.innerHTML = `<span class="ts-dot" style="background:${dotColor}"></span><span class="ts-name">${escapeHtml(s.label)}</span><span class="ts-temp num">${stale ? "--.-" : fmt1(r?.temp)}°</span>`;
+        sb.addEventListener("click", (e) => { e.stopPropagation(); selectSensor(room.id, s.id); });
+        tree.appendChild(sb);
+      });
     }
-    if (!(room.sensors || []).length) {
-      const p = document.createElement("p");
-      p.className = "tree-empty";
-      p.textContent = "No sensors";
-      tree.appendChild(p);
-    }
-
-    group.append(btn, tree);
-    nav.appendChild(group);
-  }
-  updateSidebar();
-}
-
-function applyExpand() {
-  document.querySelectorAll(".room-item[data-room]").forEach(b =>
-    b.classList.toggle("open", expanded.has(b.dataset.room)));
-  document.querySelectorAll(".sensor-tree[data-tree]").forEach(t =>
-    t.style.display = expanded.has(t.dataset.tree) ? "block" : "none");
+    li.appendChild(tree);
+    wrap.appendChild(li);
+  });
 }
 
 function updateSidebar() {
-  const cs = state.cfg.color_scale;
-  for (const room of state.cfg.rooms) {
-    const btn = document.querySelector(`.room-item[data-room="${room.id}"]`);
-    if (!btn) continue;
-    btn.classList.toggle("active", room.id === state.routeId);
-    const temps = roomTemps(room).filter(p => !isStale(p.id));
-    const avg = temps.length ? temps.reduce((a, p) => a + p.temp, 0) / temps.length : null;
-    const st = statusOf(room);
-    btn.querySelector(".ri-status").className = `ri-status ${st}`;
-    btn.querySelector(".ri-temp").textContent = `${fmt1(avg)}°`;
-    btn.querySelector(".ri-temp").style.color =
-      avg != null ? cssTempColor(avg, cs.min, cs.max) : "var(--mut)";
-
-    // Per-sensor tree rows.
-    for (const s of room.sensors || []) {
-      const row = document.querySelector(`.tree-sensor[data-sensor="${s.id}"]`);
-      if (!row) continue;
+  $$("#room-list .room-block").forEach((li, i) => {
+    const room = state.fridges[i];
+    const btn = $(".room-item", li);
+    const tree = $(".sensor-tree", li);
+    const open = state.openRooms.has(room.id);
+    btn.classList.toggle("open", open);
+    btn.classList.toggle("active", state.selectedRoom === room.id);
+    btn.setAttribute("aria-expanded", open ? "true" : "false");
+    tree.hidden = !open;
+    if (!open) return;
+    (room.sensors || []).forEach((s, j) => {
+      const sb = $$(".tree-sensor", li)[j];
+      if (!sb) return;
       const r = state.latest[s.id];
       const stale = isStale(s.id);
-      row.classList.toggle("stale", stale);
-      row.classList.toggle("selected", state.selectedSensor === s.id);
-      const col = !stale && r?.temp != null
-        ? cssTempColor(r.temp, cs.min, cs.max) : "var(--mut)";
-      row.querySelector(".ts-dot").style.background = col;
-      row.querySelector(".ts-temp").textContent = `${fmt1(r?.temp)}°`;
-    }
-  }
+      sb.className = "tree-sensor" + (state.selectedSensor === s.id ? " selected" : "") + (stale ? " stale" : "");
+      const dotColor = stale ? "var(--mut)" : cssTempColor(r?.temp, state.cfg.color_scale.min, state.cfg.color_scale.max);
+      $(".ts-dot", sb).style.background = dotColor;
+      $(".ts-temp", sb).textContent = `${stale ? "--.-" : fmt1(r?.temp)}°`;
+    });
+  });
 }
 
-function roomTemps(room) {
-  const out = [];
-  for (const s of room.sensors || []) {
-    const r = state.latest[s.id];
-    if (r && r.temp != null && !isNaN(r.temp)) out.push({ id: s.id, temp: r.temp });
-  }
-  return out;
-}
+function currentRoom() { return state.fridges.find(f => f.id === state.selectedRoom); }
 
-function selectSensor(roomId, sid) {
-  state.selectedSensor = state.selectedSensor === sid ? null : sid;
-  expanded.add(roomId);
-  if (state.routeId !== roomId) {
-    pendingScroll = sid;
-    location.hash = `#/room/${roomId}`;
-  } else {
-    updateSidebar();
-    updateRoomLive();
-    paintBottomBar(currentRoom());
-    scrollCell(sid);
-  }
-}
-
-function scrollCell(sid) {
-  const cell = document.querySelector(`[data-cell="${sid}"]`);
-  if (cell) cell.scrollIntoView({ behavior: "smooth", inline: "nearest", block: "nearest" });
-}
-
-/* ---------------- routing ---------------- */
-
-function currentRoom() {
-  return state.cfg.rooms.find(r => r.id === state.routeId);
-}
-
-let chartTimer = null;
-
-function renderRoute() {
-  clearInterval(chartTimer);
-  chartTimer = null;
-  const h = location.hash || "#/";
-  const m = h.match(/^#\/room\/(.+)$/);
-  state.routeId = (m && state.cfg.rooms.some(r => r.id === m[1]))
-    ? m[1]
-    : (state.cfg.rooms[0]?.id ?? null);
-  if (state.routeId) expanded.add(state.routeId);
-  renderMain();
-  applyExpand();
+function selectSensor(roomId, sensorId) {
+  state.selectedRoom = roomId;
+  state.openRooms.add(roomId);
+  state.selectedSensor = sensorId;
   updateSidebar();
+  updateRoomLive();
+  updateHistorySelection();
 }
 
-/* ---------------- main area ---------------- */
-
-function renderMain() {
-  const view = $("#view");
+function renderView() {
   const room = currentRoom();
-  state.selectedSensor = null;
-  if (!room) {
-    view.innerHTML = `<p class="empty-note">No rooms configured in fridges.json</p>`;
-    $("#bottombar").innerHTML = `<p class="bb-empty">No rooms configured.</p>`;
-    return;
-  }
-  const d = room.dims_m;
+  const view = $("#view");
+  if (!room) { view.innerHTML = `<div class="room-head"><h2>Select a cold room</h2></div>`; return; }
+  const th = room.thresholds || state.cfg.thresholds;
+  const min = th.target_min, warn = th.warn_max, alarm = th.alarm_max, max = state.cfg.color_scale.max;
+  const warnPct = ((warn - min) / (max - min)) * 100;
+  const alarmPct = ((alarm - min) / (max - min)) * 100;
+
   view.innerHTML = `
     <div class="room-head">
-      <div class="room-title">
+      <div>
         <h2>${escapeHtml(room.name)}</h2>
-        <p class="num">${d.length} m × ${d.width} m × ${d.height} m · zone ${escapeHtml(room.zone || "")}</p>
+        <p>${escapeHtml(room.dims)}</p>
       </div>
-      <div class="seg" role="tablist" aria-label="View plane">
-        <button data-plane="floor" class="active">Floor plan</button>
-        <button data-plane="wall">Side wall</button>
-      </div>
-      <div class="seg ranges" aria-label="History range">
-        <button data-min="30">30 min</button>
-        <button data-min="60" class="active">1 hour</button>
-        <button data-min="1440">24 hours</button>
+      <div class="room-controls">
+        <div class="seg" id="plane-seg" role="tablist" aria-label="View plane">
+          ${Object.entries(PLANES).map(([k, p]) => `<button class="seg-btn${state.plane === k ? " active" : ""}" data-plane="${k}" role="tab">${p.label}</button>`).join("")}
+        </div>
       </div>
     </div>
     <div class="alarm-banner" id="banner"></div>
-    <div class="viz-row">
-      <div class="panel">
+    <div class="stage">
+      <div class="plan-panel">
         <div class="plan-wrap"><canvas class="plan-canvas" id="field"></canvas><div class="dots" id="dots"></div></div>
         <div class="legend-wrap"><span class="num" id="leg-min"></span><canvas id="legend"></canvas><span class="num" id="leg-max"></span></div>
         <p class="plane-note" id="plane-note"></p>
       </div>
-      <aside class="panel rail">
-        <h3>Sensors</h3>
-        <div id="rail-list"></div>
-      </aside>
-    </div>`;
-
-  drawLegend($("#legend"), state.cfg);
-  $("#leg-min").textContent = `${state.cfg.color_scale.min}°C`;
-  $("#leg-max").textContent = `${state.cfg.color_scale.max}°C`;
-
-  view.querySelectorAll("[data-plane]").forEach(b =>
-    b.addEventListener("click", () => {
-      state.plane = b.dataset.plane;
-      view.querySelectorAll("[data-plane]").forEach(x => x.classList.toggle("active", x === b));
-      updateRoomLive(true);
-    }));
-  view.querySelectorAll(".ranges [data-min]").forEach(b =>
-    b.addEventListener("click", () => {
-      state.rangeMin = +b.dataset.min;
-      view.querySelectorAll(".ranges [data-min]").forEach(x => x.classList.toggle("active", x === b));
-      loadCharts();
-    }));
-
-  renderBottomBar(room);
-  loadCharts();
-  chartTimer = setInterval(loadCharts, 15000);
-  updateRoomLive(true);
-
-  if (pendingScroll) {
-    scrollCell(pendingScroll);
-    pendingScroll = null;
-  }
-}
-
-/* ---------------- bottom bar: one chart per sensor ---------------- */
-
-function renderBottomBar(room) {
-  const bb = $("#bottombar");
-  const ss = room.sensors || [];
-  if (!ss.length) {
-    bb.innerHTML = `<p class="bb-empty">No sensors assigned to ${escapeHtml(room.name)}.</p>`;
-    return;
-  }
-  bb.innerHTML = ss.map(s => `
-    <section class="chart-cell" data-cell="${s.id}">
-      <header class="cc-head">
-        <span class="cc-name">${escapeHtml(s.label)}</span>
-        <span class="cc-temp num">--.-°C</span>
-      </header>
-      <canvas></canvas>
-    </section>`).join("");
-}
-
-async function loadCharts() {
-  const room = currentRoom();
-  if (!room) return;
-  const ids = (room.sensors || []).map(s => s.id);
-  if (!ids.length) return;
-  try {
-    const d = await api(`/api/readings/history?sensors=${ids.join(",")}&minutes=${state.rangeMin}&points=120`);
-    state.seriesCache = { ...state.seriesCache, ...d.series };
-    paintBottomBar(room);
-  } catch { /* charts optional */ }
-}
-
-function paintBottomBar(room) {
-  const cs = state.cfg.color_scale;
-  for (const s of room.sensors || []) {
-    const cell = document.querySelector(`[data-cell="${s.id}"]`);
-    if (!cell) continue;
-    cell.classList.toggle("selected", state.selectedSensor === s.id);
-    const canvas = cell.querySelector("canvas");
-    drawChart(canvas, { [s.id]: state.seriesCache[s.id] || [] }, room, state.rangeMin,
-      canvas.clientHeight || 130);
-    const r = state.latest[s.id];
-    const stale = isStale(s.id);
-    const el = cell.querySelector(".cc-temp");
-    el.textContent = `${stale ? "--.-" : fmt1(r?.temp)}°C`;
-    el.style.color = !stale && r?.temp != null
-      ? cssTempColor(r.temp, cs.min, cs.max) : "var(--mut)";
-  }
-}
-
-/* ---------------- live room updates ---------------- */
-
-function activeReadings(room) {
-  const out = {};
-  for (const s of room.sensors || []) {
-    const r = state.latest[s.id];
-    if (r && !isStale(s.id)) out[s.id] = r;
-  }
-  return out;
-}
-
-function updateRoomLive(full = false) {
-  const room = currentRoom();
-  if (!room) return;
-
-  const banner = $("#banner");
-  if (banner) {
-    const st = statusOf(room);
-    if (st === "alarm") {
-      const bad = (room.sensors || []).filter(s => {
-        const r = state.latest[s.id];
-        return r && (r.fault || (room.thresholds?.alarm != null && r.temp >= room.thresholds.alarm));
-      }).map(s => `${s.label} ${state.latest[s.id].fault ? "fault" : fmt1(state.latest[s.id].temp) + " °C"}`);
-      banner.textContent = "";
-      banner.innerHTML = `<strong>Alarm:</strong> ${bad.map(escapeHtml).join(", ")} above limit`;
-      banner.classList.add("show");
-    } else if (st === "offline") {
-      banner.textContent = "No fresh readings. Check the device power and WiFi.";
-      banner.classList.add("show");
-    } else {
-      banner.classList.remove("show");
-    }
-  }
-
-  const canvas = $("#field");
-  if (!canvas) return;
-  drawField(canvas, room, state.plane, activeReadings(room), state.cfg);
-
-  $("#plane-note").textContent = state.plane === "wall"
-    ? "Side wall interpolates along length and height."
-    : "Floor plan, 1 m grid.";
-
-  const { U, V } = planeOf(room, state.plane);
-  const dots = $("#dots");
-  dots.innerHTML = "";
-  for (const s of room.sensors || []) {
-    const r = state.latest[s.id];
-    const { u, v } = sensorUV(s, state.plane);
-    const el = document.createElement("div");
-    el.className = "sdot" + (isStale(s.id) ? " stale" : "") +
-      (state.selectedSensor === s.id ? " selected" : "");
-    el.style.left = `${(u / U) * 100}%`;
-    el.style.top = `${(v / V) * 100}%`;
-    const col = r && r.temp != null
-      ? cssTempColor(r.temp, state.cfg.color_scale.min, state.cfg.color_scale.max)
-      : "var(--mut)";
-    el.innerHTML = `
-      <div class="sdot-dot" style="background:${col}"></div>
-      <div class="sdot-label num">${escapeHtml(s.label)} ${fmt1(r?.temp)}°C</div>`;
-    el.addEventListener("click", () => {
-      state.selectedSensor = state.selectedSensor === s.id ? null : s.id;
-      updateSidebar();
-      updateRoomLive();
-      paintBottomBar(room);
-    });
-    dots.appendChild(el);
-  }
-
-  const list = $("#rail-list");
-  if ((room.sensors || []).length === 0) {
-    list.innerHTML = `<p class="empty-note">No sensors assigned.</p>`;
-    return;
-  }
-  list.innerHTML = "";
-  (room.sensors || []).forEach(s => {
-    const r = state.latest[s.id];
-    const stale = isStale(s.id);
-    const row = document.createElement("button");
-    row.className = "sensor-row" + (state.selectedSensor === s.id ? " selected" : "");
-    const age = r?.time ? Math.round((Date.now() - r.time) / 1000) : null;
-    row.innerHTML = `
-      <div class="sensor-row-top">
-        <span class="sensor-name">${escapeHtml(s.label)}</span>
-        <span class="sensor-temp num" style="color:${!stale && r?.temp != null ? cssTempColor(r.temp, state.cfg.color_scale.min, state.cfg.color_scale.max) : "var(--mut)"}">${stale ? "--.-" : fmt1(r?.temp)}°C</span>
+    </div>
+    <section class="history" id="history">
+      <div class="history-head">
+        <h3>Temperature history</h3>
+        <div class="seg" id="range-seg" role="tablist" aria-label="Time range">
+          ${MINUTES.map(m => `<button class="seg-btn${state.rangeMin === m.v ? " active" : ""}" data-min="${m.v}" role="tab">${m.label}</button>`).join("")}
+        </div>
       </div>
-      <div class="sensor-meta">
-        <span>${fmt1(r?.resistance)} Ω</span>
-        <span>h ${s.z_m ?? "?"} m</span>
-        <span>${age == null ? "no data" : stale ? `stale ${age}s` : `${age}s ago`}</span>
-        <span class="${r?.fault ? "fault-flag" : ""}">${r?.fault ? "FAULT" : "ok"}</span>
-      </div>`;
-    row.addEventListener("click", () => selectSensor(room.id, s.id));
-    list.appendChild(row);
+      <div class="history-grid" id="hist-grid"></div>
+    </section>`;
+
+  $("#plane-seg").addEventListener("click", (e) => {
+    const b = e.target.closest(".seg-btn"); if (!b) return;
+    state.plane = b.dataset.plane;
+    $$("#plane-seg .seg-btn").forEach(x => x.classList.toggle("active", x === b));
+    paintField(room);
+  });
+  $("#range-seg").addEventListener("click", (e) => {
+    const b = e.target.closest(".seg-btn"); if (!b) return;
+    state.rangeMin = Number(b.dataset.min);
+    $$("#range-seg .seg-btn").forEach(x => x.classList.toggle("active", x === b));
+    buildHistory(room);
+  });
+
+  paintField(room);
+  buildHistory(room);
+}
+
+function paintDots(room) {
+  const dots = $("#dots"); if (!dots) return;
+  const c = $("#field");
+  const W = c.clientWidth, H = c.clientHeight;
+  const pad = 12;
+  const P = W ? pad / W : 0;
+  dots.innerHTML = "";
+  const pl = planeOf(room, state.plane);
+  (room.sensors || []).forEach(s => {
+    const uv = sensorUV(s, state.plane);
+    const xf = P + (uv.u / pl.U) * (1 - 2 * P);
+    const vf = P + (uv.v / pl.V) * (1 - 2 * P);
+    const el = document.createElement("div");
+    const stale = isStale(s.id);
+    el.className = "sdot" + (state.selectedSensor === s.id ? " selected" : "") + (stale ? " stale" : "");
+    el.style.left = (xf * 100) + "%";
+    el.style.top = (vf * 100) + "%";
+    const r = state.latest[s.id];
+    const col = stale ? "var(--mut)" : cssTempColor(r?.temp, state.cfg.color_scale.min, state.cfg.color_scale.max);
+    el.innerHTML = `<span class="sdot-dot" style="background:${col}"></span><span class="sdot-label">${escapeHtml(s.label)} ${stale ? "--.-" : fmt1(r?.temp)}°</span>`;
+    el.addEventListener("click", () => selectSensor(room.id, s.id));
+    dots.appendChild(el);
   });
 }
 
-window.addEventListener("resize", () => {
-  clearTimeout(window.__rz);
-  window.__rz = setTimeout(() => {
-    updateRoomLive(true);
-    const room = currentRoom();
-    if (room) paintBottomBar(room);
-  }, 150);
-});
-
-/* ---------------- boot ---------------- */
-
-function escapeHtml(s) {
-  return String(s ?? "").replace(/[&<>"']/g, c => ({
-    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
-  }[c]));
+function paintField(room) {
+  const c = $("#field"); if (!c) return;
+  drawField(c, room, state.plane, state.latest, state.cfg);
+  drawLegend($("#legend"), state.cfg.color_scale, 200);
+  $("#leg-min").textContent = fmt1(state.cfg.color_scale.min) + "°";
+  $("#leg-max").textContent = fmt1(state.cfg.color_scale.max) + "°";
+  const p = PLANES[state.plane];
+  const th = room.thresholds || state.cfg.thresholds;
+  $("#plane-note").innerHTML = `${p.long} &middot; target ${fmt1(th.target_min)}–${fmt1(th.target_max)}°C &middot; warn ${fmt1(th.warn_max)}° &middot; alarm ${fmt1(th.alarm_max)}°`;
+  paintDots(room);
 }
 
-setInterval(() => { if (state.conn === "live") scheduleRefresh(); }, 3000);
+function updateRoomLive() {
+  const room = currentRoom(); if (!room) return;
+  paintField(room);
+  const th = room.thresholds || state.cfg.thresholds;
+  const banner = $("#banner");
+  let worst = null, worstTemp = null;
+  (room.sensors || []).forEach(s => {
+    const r = state.latest[s.id];
+    if (!r || r.fault) { worst = worst || "fault"; }
+    else if (r.temp != null) {
+      if (r.temp > th.alarm_max && (!worstTemp || r.temp > worstTemp)) { worst = "alarm"; worstTemp = r.temp; }
+      else if (r.temp > th.warn_max && worst !== "alarm") { worst = "warn"; }
+    }
+  });
+  if (!worst) { banner.className = "alarm-banner"; banner.textContent = "All sensors within target range"; }
+  else if (worst === "alarm") { banner.className = "alarm-banner alarm"; banner.textContent = `ALARM: ${fmt1(worstTemp)}°C exceeds ${fmt1(th.alarm_max)}°C`; }
+  else if (worst === "warn") { banner.className = "alarm-banner warn"; banner.textContent = `Warning: temperature above ${fmt1(th.warn_max)}°C`; }
+  else { banner.className = "alarm-banner warn"; banner.textContent = "Sensor fault detected"; }
+  updateSidebar();
+  updateHistorySelection();
+}
 
-(async function init() {
+function chartCardColor(idx) { return LINE_COLORS[idx % LINE_COLORS.length]; }
+
+function destroyCharts() {
+  state.observers.forEach(o => o.disconnect());
+  state.observers.clear();
+  state.charts.forEach(ch => ch.u && ch.u.destroy());
+  state.charts.clear();
+}
+
+async function buildHistory(room) {
+  const grid = $("#hist-grid"); if (!grid) return;
+  destroyCharts();
+  const sensors = room.sensors || [];
+  grid.innerHTML = "";
+  if (sensors.length === 0) { grid.innerHTML = `<p class="empty-note">No sensors assigned to this room.</p>`; return; }
+
+  let series = {};
   try {
-    state.cfg = await api("/api/fridges");
+    const ids = sensors.map(s => s.id).join(",");
+    series = await api(`/api/readings/history?ids=${encodeURIComponent(ids)}&minutes=${state.rangeMin}&points=600`);
+  } catch (e) { /* keep empty */ }
+
+  const seconds = state.rangeMin * 60;
+  sensors.forEach((s, idx) => {
+    const card = document.createElement("div");
+    card.className = "chart-card" + (state.selectedSensor === s.id ? " selected" : "");
+    card.dataset.sensor = s.id;
+    card.innerHTML = `
+      <div class="chart-card-head">
+        <span class="hc-name">${escapeHtml(s.label)}</span>
+        <span class="hc-temp num" id="hc-temp-${s.id}">--.-°</span>
+      </div>
+      <div class="chart-host" id="chart-${s.id}"><div class="chart-empty">Awaiting data</div></div>`;
+    card.addEventListener("click", () => selectSensor(room.id, s.id));
+    grid.appendChild(card);
+
+    const rows = (series.series && series.series[s.id]) || [];
+    const xs = rows.map(r => Math.round(r[0] / 1000));
+    const ys = rows.map(r => r[1]);
+    const host = $("#chart-" + s.id, card);
+    const ch = { id: s.id, color: chartCardColor(idx), xs, ys, el: host, u: null };
+    state.charts.set(s.id, ch);
+    if (xs.length) { host.innerHTML = ""; ch.u = makeChart(host, ch); }
+    observeChart(ch);
+  });
+  updateHistorySelection();
+}
+
+function thresholdPlugin(th) {
+  return {
+    hooks: {
+      draw(u) {
+        const ctx = u.ctx;
+        ctx.save();
+        ctx.setLineDash([4, 4]);
+        ctx.lineWidth = 1;
+        for (const [v, col] of [[th.target_min, "rgba(52,211,153,0.5)"], [th.target_max, "rgba(56,189,248,0.45)"]]) {
+          if (v == null) continue;
+          const y = u.valToPos(v, "y", true);
+          if (y < u.bbox.top || y > u.bbox.top + u.bbox.height) continue;
+          ctx.strokeStyle = col;
+          ctx.beginPath();
+          ctx.moveTo(u.bbox.left, y);
+          ctx.lineTo(u.bbox.left + u.bbox.width, y);
+          ctx.stroke();
+        }
+        ctx.restore();
+      }
+    }
+  };
+}
+
+function makeChart(host, ch) {
+  const room = currentRoom();
+  const th = (room.thresholds || state.cfg.thresholds);
+  const fill = ch.color + "1f";
+  const opts = {
+    width: Math.max(host.clientWidth || 480, 220),
+    height: 190,
+    padding: [10, 12, 22, 36],
+    cursor: {
+      points: { size: 5, width: 2, stroke: ch.color, fill: "#0d1117" },
+      drag: { x: false, y: false },
+    },
+    legend: { show: false },
+    scales: { x: { time: true } },
+    axes: [
+      {
+        stroke: AXIS, grid: { stroke: GRID }, ticks: { show: false }, font: FONT,
+        values: (u, splits) => splits.map(s => {
+          const d = new Date(s * 1000);
+          return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+        }),
+      },
+      {
+        stroke: AXIS, grid: { stroke: GRID }, ticks: { show: false }, font: FONT,
+        size: 36,
+        values: (u, splits) => splits.map(v => v.toFixed(1)),
+      },
+    ],
+    series: [
+      {},
+      { stroke: ch.color, width: 1.8, fill: fill, spanGaps: false, points: { show: false } },
+    ],
+    plugins: [thresholdPlugin(th)],
+  };
+  const u = new UP(opts, [ch.xs, ch.ys], host);
+  sizeChart(ch);
+  return u;
+}
+
+function sizeChart(ch) {
+  if (!ch.u) return;
+  const w = Math.max(ch.el.clientWidth || 480, 220);
+  ch.u.setSize({ width: w, height: 190 });
+}
+
+function observeChart(ch) {
+  if (!("ResizeObserver" in window)) return;
+  const ro = new ResizeObserver(() => sizeChart(ch));
+  ro.observe(ch.el);
+  state.observers.set(ch.id, ro);
+}
+
+function queueLive(id, t, temp) {
+  if (!state.charts.has(id)) return;
+  if (!state.liveQueue.has(id)) state.liveQueue.set(id, []);
+  state.liveQueue.get(id).push([Math.round(t / 1000), temp]);
+  if (!state.livePending) { state.livePending = true; requestAnimationFrame(flushLive); }
+}
+
+function flushLive() {
+  state.livePending = false;
+  const cutoff = Math.floor(Date.now() / 1000) - state.rangeMin * 60;
+  state.liveQueue.forEach((pts, id) => {
+    const ch = state.charts.get(id);
+    if (!ch) return;
+    for (const [x, y] of pts) { ch.xs.push(x); ch.ys.push(y); }
+    while (ch.xs.length && ch.xs[0] < cutoff) { ch.xs.shift(); ch.ys.shift(); }
+    if (ch.u) ch.u.setData([ch.xs, ch.ys]);
+  });
+  state.liveQueue.clear();
+  updateHistorySelection();
+}
+
+function updateHistorySelection() {
+  state.charts.forEach((ch, id) => {
+    const card = document.querySelector(`.chart-card[data-sensor="${id}"]`);
+    if (!card) return;
+    card.classList.toggle("selected", state.selectedSensor === id);
+    const r = state.latest[id];
+    const tEl = $("#hc-temp-" + id, card);
+    if (tEl) {
+      const stale = isStale(id);
+      tEl.textContent = stale ? "--.-°" : fmt1(r.temp) + "°";
+      tEl.style.color = stale ? "var(--mut)" : cssTempColor(r.temp, state.cfg.color_scale.min, state.cfg.color_scale.max);
+    }
+  });
+}
+
+function setConn(s) {
+  state.connected = s === "ok";
+  $("#conn-dot").className = "conn-dot " + s;
+  $("#conn-label").textContent = netLabel(s);
+}
+
+function onLive(evt) {
+  const s = evt;
+  if (!s || !s.sensor_id) return;
+  state.latest[s.sensor_id] = { temp: s.temp, resistance: s.resistance, fault: s.fault, time: Date.now() };
+  queueLive(s.sensor_id, Date.now(), s.temp);
+  updateRoomLive();
+}
+
+function connectSSE() {
+  try { state.sse && state.sse.close(); } catch (e) {}
+  const es = new EventSource("/api/stream");
+  state.sse = es;
+  es.onopen = () => setConn("ok");
+  es.onerror = () => setConn("down");
+  es.onmessage = (ev) => { try { onLive(JSON.parse(ev.data)); } catch (e) {} };
+}
+
+async function pollServer() {
+  const now = Date.now();
+  if (now - state.lastPoll < 4000) return;
+  state.lastPoll = now;
+  try {
+    const data = await api("/api/readings/latest");
+    const map = data.readings || {};
+    Object.entries(map).forEach(([id, v]) => {
+      const t = typeof v.time === "number" ? v.time : (v.time ? Date.parse(v.time) : Date.now());
+      if (!state.latest[id] || t > state.latest[id].time) {
+        state.latest[id] = { temp: v.temp, resistance: v.resistance, fault: v.fault, time: t };
+      }
+    });
+    if (now - state.lastNet > 4000) setConn("ok");
+    state.lastNet = now;
+    updateRoomLive();
   } catch (e) {
-    $("#view").innerHTML = `<p class="err">Backend unreachable: ${escapeHtml(e.message)}</p>`;
-    return;
+    if (now - state.lastNet > 8000) setConn("down");
   }
-  window.addEventListener("hashchange", renderRoute);
-  renderRoute();
-  renderSidebar();
-  openStream();
-})();
+}
+
+async function boot() {
+  try {
+    const data = await api("/api/fridges");
+    state.fridges = (data.rooms || []).map(r => ({
+      ...r,
+      thresholds: {
+        target_min: r.thresholds.target_min,
+        target_max: r.thresholds.target_max,
+        warn_max: r.thresholds.warn,
+        alarm_max: r.thresholds.alarm,
+      },
+    }));
+    state.cfg = { color_scale: data.color_scale, stale_after_s: data.stale_after_s || 15, thresholds: null };
+  } catch (e) {
+    state.fridges = [];
+    state.cfg = { color_scale: { min: -25, max: 25 }, stale_after_s: 15, thresholds: null };
+  }
+  buildSidebar();
+  if (!state.selectedRoom && state.fridges[0]) state.selectedRoom = state.fridges[0].id;
+  renderView();
+  connectSSE();
+  setInterval(pollServer, 4000);
+  setInterval(() => { if (state.connected) updateRoomLive(); }, 2500);
+  window.addEventListener("resize", () => { const r = currentRoom(); if (r) paintField(r); });
+}
+
+boot();
