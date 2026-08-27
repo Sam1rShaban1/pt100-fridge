@@ -186,12 +186,35 @@ def readings_latest():
     return {"readings": query_latest(_room_sensor_ids(cfg))}
 
 
+# In-memory (memcached-style) cache for history queries so range toggles and
+# reloads don't hammer InfluxDB on every request.
+_history_cache = {}
+_history_lock = threading.Lock()
+_HISTORY_TTL = 4.0
+
+def _history_cache_get(key):
+    with _history_lock:
+        item = _history_cache.get(key)
+        if item and (time.time() - item[1]) < _HISTORY_TTL:
+            return item[0]
+        return None
+
+def _history_cache_put(key, val):
+    with _history_lock:
+        _history_cache[key] = (val, time.time())
+
 @app.get("/api/readings/history")
 def readings_history(sensors: str = "", minutes: int = 60, points: int = 90):
     ids = [s.strip() for s in sensors.split(",") if s.strip()]
     if not ids:
         ids = _room_sensor_ids(load_rooms())
-    return {"series": query_history(ids, minutes, points)}
+    key = (tuple(sorted(ids)), minutes, points)
+    cached = _history_cache_get(key)
+    if cached is not None:
+        return {"series": cached, "cached": True}
+    series = query_history(ids, minutes, points)
+    _history_cache_put(key, series)
+    return {"series": series}
 
 
 # ---------------- live stream (SSE) ----------------

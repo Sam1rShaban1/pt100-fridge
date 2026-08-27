@@ -49,9 +49,6 @@ const MINUTES = [
   { v: 1440, label: "24h" },
 ];
 
-const CACHE_MIN = 1440;
-const CACHE_POINTS = 2000;
-
 const state = {
   fridges: [],
   cfg: null,
@@ -347,34 +344,27 @@ function pushLiveSpark(id, x, y) {
   while (s.xs.length && s.xs[0] < cutoff) { s.xs.shift(); s.ys.shift(); }
 }
 
-async function loadAllHistory() {
-  const ids = [];
-  state.fridges.forEach((r) => (r.sensors || []).forEach((s) => ids.push(s.id)));
-  if (!ids.length) return;
+// Per-range result cache: keyed by `${sensorId}|${rangeMin}`. Each range is
+// fetched once at full granularity, then reused on toggle (no reload, no DB hit).
+async function loadRange(rangeMin, room) {
+  const sensors = room.sensors || [];
+  const missing = sensors.filter(s => !state.cache.has(`${s.id}|${rangeMin}`));
+  if (!missing.length) return;
   try {
-    const series = await api(`/api/readings/history?ids=${encodeURIComponent(ids.join(","))}&minutes=${CACHE_MIN}&points=${CACHE_POINTS}`);
+    const ids = missing.map(s => s.id).join(",");
+    const series = await api(`/api/readings/history?ids=${encodeURIComponent(ids)}&minutes=${rangeMin}&points=600`);
     Object.entries((series.series) || {}).forEach(([id, rows]) => {
-      state.cache.set(id, { xs: rows.map((r) => Math.round(r[0] / 1000)), ys: rows.map((r) => r[1]) });
+      state.cache.set(`${id}|${rangeMin}`, { xs: rows.map((r) => Math.round(r[0] / 1000)), ys: rows.map((r) => r[1]) });
     });
-  } catch (e) { /* offline */ }
+  } catch (e) { /* keep what we have */ }
 }
 
-function cacheWindow(id, rangeMin) {
-  const c = state.cache.get(id);
-  if (!c || !c.xs.length) return { xs: [], ys: [] };
-  const cutoff = Math.floor(Date.now() / 1000) - rangeMin * 60;
-  const xs = [], ys = [];
-  for (let i = 0; i < c.xs.length; i++) {
-    if (c.xs[i] >= cutoff) { xs.push(c.xs[i]); ys.push(c.ys[i]); }
-  }
-  return { xs, ys };
-}
-
-function pushLiveCache(id, x, y) {
-  let c = state.cache.get(id);
-  if (!c) { c = { xs: [], ys: [] }; state.cache.set(id, c); }
+function pushLiveRange(id, x, y) {
+  const key = `${id}|${state.rangeMin}`;
+  const c = state.cache.get(key);
+  if (!c) return;
   c.xs.push(x); c.ys.push(y);
-  const cutoff = Math.floor(Date.now() / 1000) - CACHE_MIN * 60;
+  const cutoff = Math.floor(Date.now() / 1000) - state.rangeMin * 60;
   while (c.xs.length && c.xs[0] < cutoff) { c.xs.shift(); c.ys.shift(); }
 }
 
@@ -471,17 +461,8 @@ async function buildHistory(room) {
   grid.innerHTML = "";
   if (sensors.length === 0) { grid.innerHTML = `<p class="empty-note">No sensors assigned to this room.</p>`; return; }
 
-  // One server fetch at most: backfill the local cache for any missing sensor.
-  const missing = sensors.filter(s => !state.cache.has(s.id));
-  if (missing.length) {
-    try {
-      const ids = missing.map(s => s.id).join(",");
-      const series = await api(`/api/readings/history?ids=${encodeURIComponent(ids)}&minutes=${CACHE_MIN}&points=${CACHE_POINTS}`);
-      Object.entries((series.series) || {}).forEach(([id, rows]) => {
-        state.cache.set(id, { xs: rows.map(r => Math.round(r[0] / 1000)), ys: rows.map(r => r[1]) });
-      });
-    } catch (e) { /* keep what we have */ }
-  }
+  // Fetch this range's data once at full granularity; cached for reuse.
+  await loadRange(state.rangeMin, room);
 
   sensors.forEach((s, idx) => {
     const card = document.createElement("div");
@@ -496,7 +477,7 @@ async function buildHistory(room) {
     card.addEventListener("click", () => selectSensor(room.id, s.id));
     grid.appendChild(card);
 
-    const w = cacheWindow(s.id, state.rangeMin);
+    const w = state.cache.get(`${s.id}|${state.rangeMin}`) || { xs: [], ys: [] };
     const host = $("#chart-" + s.id, card);
     const ch = { id: s.id, color: chartCardColor(idx), xs: w.xs, ys: w.ys, el: host, u: null };
     state.charts.set(s.id, ch);
@@ -506,9 +487,12 @@ async function buildHistory(room) {
   updateHistorySelection();
 }
 
-function updateHistoryRange() {
+async function updateHistoryRange() {
+  const room = currentRoom(); if (!room) return;
+  await loadRange(state.rangeMin, room);
   state.charts.forEach((ch, id) => {
-    const w = cacheWindow(id, state.rangeMin);
+    const w = state.cache.get(`${id}|${state.rangeMin}`);
+    if (!w) return;
     ch.xs = w.xs; ch.ys = w.ys;
     if (ch.u) {
       const u = ch.u;
@@ -775,7 +759,7 @@ function onLive(evt) {
   state.latest[s.sensor_id] = { temp: s.temp, resistance: s.resistance, fault: s.fault, time: Date.now() };
   queueLive(s.sensor_id, Date.now(), s.temp);
   pushLiveSpark(s.sensor_id, Math.round(Date.now() / 1000), s.temp);
-  pushLiveCache(s.sensor_id, Math.round(Date.now() / 1000), s.temp);
+  pushLiveRange(s.sensor_id, Math.round(Date.now() / 1000), s.temp);
   updateRoomLive();
 }
 
@@ -829,7 +813,6 @@ async function boot() {
   buildSidebar();
   buildKPIs();
   if (!state.selectedRoom && state.fridges[0]) state.selectedRoom = state.fridges[0].id;
-  await loadAllHistory();
   renderView();
   buildFleet();
   loadSparks();
