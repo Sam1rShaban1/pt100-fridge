@@ -33,6 +33,7 @@ const state = {
   selectedSensor: null,
   openRooms: new Set(),
   charts: new Map(),
+  spark: new Map(),
   liveQueue: new Map(),
   livePending: false,
   lastNet: 0,
@@ -102,7 +103,7 @@ function buildSidebar() {
         const sb = document.createElement("button");
         sb.className = "tree-sensor" + (state.selectedSensor === s.id ? " selected" : "") + (stale ? " stale" : "");
         const dotColor = stale ? "var(--mut)" : cssTempColor(r?.temp, state.cfg.color_scale.min, state.cfg.color_scale.max);
-        sb.innerHTML = `<span class="ts-dot" style="background:${dotColor}"></span><span class="ts-name">${escapeHtml(s.label)}</span><span class="ts-temp num">${stale ? "--.-" : fmt1(r?.temp)}°</span>`;
+        sb.innerHTML = `<span class="ts-dot" style="background:${dotColor}"></span><span class="ts-name">${escapeHtml(s.label)}</span><span class="ts-temp num">${stale ? "--.-" : fmt1(r?.temp)}°</span><canvas class="ts-spark" data-spark></canvas>`;
         sb.addEventListener("click", (e) => { e.stopPropagation(); selectSensor(room.id, s.id); });
         tree.appendChild(sb);
       });
@@ -132,6 +133,11 @@ function updateSidebar() {
       const dotColor = stale ? "var(--mut)" : cssTempColor(r?.temp, state.cfg.color_scale.min, state.cfg.color_scale.max);
       $(".ts-dot", sb).style.background = dotColor;
       $(".ts-temp", sb).textContent = `${stale ? "--.-" : fmt1(r?.temp)}°`;
+      const sp = $(".ts-spark", sb);
+      if (sp && !stale && state.spark.has(s.id)) {
+        const s2 = state.spark.get(s.id);
+        drawSpark(sp, s2.xs, s2.ys, cssTempColor(r?.temp, state.cfg.color_scale.min, state.cfg.color_scale.max));
+      }
     });
   });
 }
@@ -151,6 +157,130 @@ function selectSensor(roomId, sensorId) {
   updateSidebar();
   updateRoomLive();
   updateHistorySelection();
+}
+
+function drawSpark(canvas, xs, ys, color) {
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  if (!w || !h) return;
+  canvas.width = Math.round(w * dpr);
+  canvas.height = Math.round(h * dpr);
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  if (!xs || xs.length < 2) {
+    ctx.strokeStyle = "rgba(148,163,184,0.3)";
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(0, h / 2); ctx.lineTo(w, h / 2); ctx.stroke();
+    return;
+  }
+  let min = Infinity, max = -Infinity;
+  for (const v of ys) { if (v < min) min = v; if (v > max) max = v; }
+  if (max - min < 1e-6) { max += 1; min -= 1; }
+  const padX = 2, padY = 3;
+  const n = xs.length - 1;
+  const X = (i) => padX + (xs[i] - xs[0]) / (xs[n] - xs[0] || 1) * (w - padX * 2);
+  const Y = (v) => h - padY - (v - min) / (max - min) * (h - padY * 2);
+  ctx.beginPath();
+  for (let i = 0; i <= n; i++) (i ? ctx.lineTo : ctx.moveTo).call(ctx, X(i), Y(ys[i]));
+  ctx.strokeStyle = color; ctx.lineWidth = 1.5; ctx.lineJoin = "round"; ctx.stroke();
+  ctx.lineTo(X(n), h); ctx.lineTo(X(0), h); ctx.closePath();
+  ctx.fillStyle = color.startsWith("#") ? color + "22" : "rgba(125,211,252,0.13)";
+  ctx.fill();
+}
+
+function roomStatus(room) {
+  const sensors = room.sensors || [];
+  if (!sensors.length) return { level: "empty", temp: null, sensorId: null, sub: "No sensors" };
+  const th = room.thresholds || state.cfg.thresholds;
+  let online = 0, fault = false, maxTemp = -Infinity, repId = null;
+  sensors.forEach((s) => {
+    const r = state.latest[s.id];
+    if (!r || !r.time || (Date.now() - r.time) > ((state.cfg && state.cfg.stale_after_s) || 15) * 1000) return;
+    online++;
+    if (r.fault) fault = true;
+    if (r.temp != null && r.temp > maxTemp) { maxTemp = r.temp; repId = s.id; }
+  });
+  if (online === 0) return { level: "offline", temp: null, sensorId: null, sub: "No data" };
+  let level = "ok";
+  if (fault) level = "alarm";
+  else if (maxTemp > th.alarm_max) level = "alarm";
+  else if (maxTemp > th.warn_max) level = "warn";
+  const sub = fault ? "Sensor fault" : `Warmest ${fmt1(maxTemp)}° · ${sensors.length} sensors`;
+  return { level, temp: maxTemp, sensorId: repId, sub };
+}
+
+const SPARK_COLOR = { ok: "#7dd3fc", warn: "#fbbf24", alarm: "#f87171", offline: "#64748b", empty: "#64748b" };
+
+function buildFleet() {
+  const el = $("#fleet"); if (!el) return;
+  el.innerHTML = "";
+  state.fridges.forEach((room) => {
+    const card = document.createElement("button");
+    card.className = "fleet-card";
+    card.dataset.room = room.id;
+    card.innerHTML = `
+      <div class="fc-top">
+        <span class="fc-dot" data-dot></span>
+        <span class="fc-name">${escapeHtml(room.name)}</span>
+        <span class="fc-age num" data-age></span>
+      </div>
+      <div class="fc-temp num" data-temp>--.-°</div>
+      <div class="fc-sub" data-sub></div>
+      <canvas class="fc-spark" data-spark></canvas>`;
+    card.addEventListener("click", () => {
+      state.selectedRoom = room.id;
+      state.openRooms.add(room.id);
+      buildSidebar();
+      renderView();
+      updateFleet();
+    });
+    el.appendChild(card);
+  });
+  updateFleet();
+}
+
+function updateFleet() {
+  const el = $("#fleet"); if (!el) return;
+  $$(".fleet-card", el).forEach((card) => {
+    const room = state.fridges.find((f) => f.id === card.dataset.room);
+    if (!room) return;
+    const st = roomStatus(room);
+    $("[data-dot]", card).className = "fc-dot " + st.level;
+    const tempEl = $("[data-temp]", card);
+    tempEl.textContent = st.temp == null ? "--.-°" : fmt1(st.temp) + "°";
+    tempEl.style.color = st.temp == null ? "var(--mut)" : cssTempColor(st.temp, state.cfg.color_scale.min, state.cfg.color_scale.max);
+    $("[data-sub]", card).textContent = st.sub;
+    const rep = st.sensorId && state.latest[st.sensorId];
+    $("[data-age]", card).textContent = rep ? fmtAge(Date.now() - rep.time) : "no data";
+    const sp = $("[data-spark]", card);
+    if (st.sensorId && state.spark.has(st.sensorId)) {
+      const s = state.spark.get(st.sensorId);
+      drawSpark(sp, s.xs, s.ys, SPARK_COLOR[st.level] || SPARK_COLOR.ok);
+    }
+  });
+}
+
+async function loadSparks() {
+  const ids = [];
+  state.fridges.forEach((r) => (r.sensors || []).forEach((s) => ids.push(s.id)));
+  if (!ids.length) return;
+  try {
+    const series = await api(`/api/readings/history?ids=${encodeURIComponent(ids.join(","))}&minutes=30&points=120`);
+    Object.entries((series.series) || {}).forEach(([id, rows]) => {
+      state.spark.set(id, { xs: rows.map((r) => Math.round(r[0] / 1000)), ys: rows.map((r) => r[1]) });
+    });
+  } catch (e) { /* offline */ }
+  updateFleet();
+  updateSidebar();
+}
+
+function pushLiveSpark(id, x, y) {
+  let s = state.spark.get(id);
+  if (!s) { s = { xs: [], ys: [] }; state.spark.set(id, s); }
+  s.xs.push(x); s.ys.push(y);
+  const cutoff = Math.floor(Date.now() / 1000) - 30 * 60;
+  while (s.xs.length && s.xs[0] < cutoff) { s.xs.shift(); s.ys.shift(); }
 }
 
 function renderView() {
@@ -226,6 +356,7 @@ function updateRoomLive() {
   }
   updateSidebar();
   updateHistorySelection();
+  updateFleet();
 }
 
 function chartCardColor(idx) { return LINE_COLORS[idx % LINE_COLORS.length]; }
@@ -425,6 +556,7 @@ function onLive(evt) {
   if (!s || !s.sensor_id) return;
   state.latest[s.sensor_id] = { temp: s.temp, resistance: s.resistance, fault: s.fault, time: Date.now() };
   queueLive(s.sensor_id, Date.now(), s.temp);
+  pushLiveSpark(s.sensor_id, Math.round(Date.now() / 1000), s.temp);
   updateRoomLive();
 }
 
@@ -478,6 +610,8 @@ async function boot() {
   buildSidebar();
   if (!state.selectedRoom && state.fridges[0]) state.selectedRoom = state.fridges[0].id;
   renderView();
+  buildFleet();
+  loadSparks();
   const rs = $("#range-seg");
   if (rs) rs.addEventListener("click", (e) => {
     const b = e.target.closest(".seg-btn"); if (!b) return;
