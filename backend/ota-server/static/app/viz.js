@@ -27,6 +27,17 @@ export function tempColor(t, min, max) {
 
 export function cssTempColor(t, min, max) { return tempColor(t, min, max); }
 
+function rr(ctx, x, y, w, h, r) {
+  if (ctx.roundRect) { ctx.beginPath(); ctx.roundRect(x, y, w, h, r); return; }
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
 export function drawLegend(canvas, cfg) {
   const cs = cfg.color_scale || { min: -10, max: 15 };
   const w = 340, h = 10;
@@ -96,7 +107,7 @@ export function createModel3D(canvas) {
 
   function buildFaces(room, field, cs) {
     const d = room.dims_m;
-    const N = 56;
+    const N = 128;
     const mk = () => { const c = document.createElement("canvas"); c.width = N; c.height = N; return c; };
     const floor = mk(), wallL = mk(), wallR = mk(), wallFront = mk(), top = mk();
     paintFace(floor, field, (u, v) => ({ x: u, y: v, z: 0 }), d.length, d.width, cs);
@@ -135,6 +146,7 @@ export function createModel3D(canvas) {
       canvas.style.width = cw + "px"; canvas.style.height = chh + "px";
     }
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.imageSmoothingEnabled = true;
     ctx.clearRect(0, 0, cw, chh);
     if (!room) return;
     const d = room.dims_m;
@@ -187,6 +199,16 @@ export function createModel3D(canvas) {
     const rA = P(d.length, 0, 0), rB = P(d.length, d.width, 0), rD = P(d.length, 0, d.height);
     const frA = P(0, d.width, 0), frB = P(d.length, d.width, 0), frD = P(0, d.width, d.height);
     const tA = P(0, 0, d.height), tB = P(d.length, 0, d.height), tD = P(0, d.width, d.height);
+    // Soft contact shadow for depth.
+    const sc = P(d.length / 2, d.width / 2, 0);
+    const shR = Math.max(cw, chh) * 0.42;
+    const sg = ctx.createRadialGradient(sc.x, sc.y, 4, sc.x, sc.y, shR);
+    sg.addColorStop(0, "rgba(0,0,0,0.38)");
+    sg.addColorStop(0.7, "rgba(0,0,0,0.10)");
+    sg.addColorStop(1, "rgba(0,0,0,0)");
+    ctx.fillStyle = sg;
+    ctx.fillRect(0, 0, cw, chh);
+
     // Opaque faces -> the box reads as a solid colored volume.
     drawFace(faceTex.floor, fA, fB, fD, 1.0);
     drawFace(faceTex.wallL, lA, lB, lD, 0.95);
@@ -194,14 +216,19 @@ export function createModel3D(canvas) {
     drawFace(faceTex.wallFront, frA, frB, frD, 0.97);
     drawFace(faceTex.top, tA, tB, tD, 0.92);
 
-    // Wireframe edges.
+    // Wireframe edges with a soft glow.
     const pe = corners.map(([x, y, z]) => P(x, y, z));
     const edges = [[0, 1], [1, 2], [2, 3], [3, 0], [4, 5], [5, 6], [6, 7], [7, 4], [0, 4], [1, 5], [2, 6], [3, 7]];
-    ctx.strokeStyle = "rgba(226,232,240,0.7)";
-    ctx.lineWidth = 1.4;
+    ctx.save();
+    ctx.shadowColor = "rgba(125,211,252,0.35)";
+    ctx.shadowBlur = 6;
+    ctx.strokeStyle = "rgba(226,232,240,0.85)";
+    ctx.lineWidth = 1.3;
+    ctx.lineJoin = "round"; ctx.lineCap = "round";
     ctx.beginPath();
     for (const [i, j] of edges) { ctx.moveTo(pe[i].x, pe[i].y); ctx.lineTo(pe[j].x, pe[j].y); }
     ctx.stroke();
+    ctx.restore();
 
     // Door gap on the front-bottom edge (corner 3 -> 2, y = width).
     const door = room.door;
@@ -229,11 +256,12 @@ export function createModel3D(canvas) {
       p.x = nx; p.y = ny; p.z = nz;
       const lt = field ? field(nx, ny, nz) : (cs.min + cs.max) / 2;
       const m = tempColor(lt, cs.min, cs.max).match(/\d+/g);
+      const depth = 0.42 + 0.58 * (1 - Math.abs(nz - d.height / 2) / (d.height / 2 || 1));
       const pts = p.trail.map(q => P(q.x, q.y, q.z));
       for (let k = 1; k < pts.length; k++) {
-        const a = (k / pts.length) * 0.5;
+        const a = (k / pts.length) * 0.4 * depth;
         ctx.strokeStyle = `rgba(${m[0]},${m[1]},${m[2]},${a})`;
-        ctx.lineWidth = 1.4 * (k / pts.length) + 0.3;
+        ctx.lineWidth = 1.3 * (k / pts.length) + 0.3;
         ctx.beginPath(); ctx.moveTo(pts[k - 1].x, pts[k - 1].y); ctx.lineTo(pts[k].x, pts[k].y); ctx.stroke();
       }
       if (pts.length >= 2) {
@@ -250,32 +278,47 @@ export function createModel3D(canvas) {
     }
     ctx.globalCompositeOperation = "source-over";
 
-    // Sensor markers.
+    // Sensor markers with refined label chips.
     markers = [];
     (room.sensors || []).forEach(s => {
       const pr = P(s.x_m, s.y_m, s.z_m ?? 0);
       const r = readings[s.id];
       const stale = !r || r.time == null || (Date.now() - r.time) > ((cfg.stale_after_s || 15) * 1000);
       const col = stale ? "#8fa3b5" : tempColor(r.temp, cs.min, cs.max);
-      const pulse = 1 + 0.18 * Math.sin(t * 3 + (s.x_m + s.y_m));
-      const rad = 7 * pulse;
-      const g = ctx.createRadialGradient(pr.x, pr.y, 1, pr.x, pr.y, rad * 2.4);
+      const pulse = 1 + 0.16 * Math.sin(t * 2.4 + (s.x_m + s.y_m));
+      const rad = 6.5 * pulse;
+      const g = ctx.createRadialGradient(pr.x, pr.y, 1, pr.x, pr.y, rad * 2.6);
       g.addColorStop(0, col);
       g.addColorStop(1, "rgba(0,0,0,0)");
       ctx.fillStyle = g;
-      ctx.beginPath(); ctx.arc(pr.x, pr.y, rad * 2.4, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc(pr.x, pr.y, rad * 2.6, 0, Math.PI * 2); ctx.fill();
       ctx.fillStyle = col;
-      ctx.beginPath(); ctx.arc(pr.x, pr.y, rad * 0.55, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc(pr.x, pr.y, rad * 0.6, 0, Math.PI * 2); ctx.fill();
       if (selectedId === s.id) {
         ctx.strokeStyle = "#7dd3fc"; ctx.lineWidth = 2;
-        ctx.beginPath(); ctx.arc(pr.x, pr.y, rad + 4, 0, Math.PI * 2); ctx.stroke();
+        ctx.beginPath(); ctx.arc(pr.x, pr.y, rad + 5, 0, Math.PI * 2); ctx.stroke();
       }
-      ctx.fillStyle = "rgba(226,232,240,0.95)";
-      ctx.font = "11px ui-monospace, Menlo, Consolas, monospace";
+      const val = stale ? "--.-" : r.temp.toFixed(1) + "°";
+      ctx.font = "600 11px ui-monospace, Menlo, Consolas, monospace";
       ctx.textAlign = "left";
-      const label = `${s.label} ${stale ? "--.-" : r.temp.toFixed(1)}°`;
-      ctx.fillText(label, pr.x + rad + 6, pr.y - rad - 2);
-      markers.push({ id: s.id, x: pr.x, y: pr.y, r: rad + 6 });
+      ctx.textBaseline = "middle";
+      const nameW = ctx.measureText(s.label).width;
+      const valW = ctx.measureText(val).width;
+      const padX = 7, gap = 6, bh = 20;
+      const bw = padX * 2 + nameW + gap + valW;
+      const bx = pr.x + rad + 8, by = pr.y - bh / 2;
+      rr(ctx, bx, by, bw, bh, 6);
+      ctx.fillStyle = "rgba(9,13,19,0.82)";
+      ctx.fill();
+      ctx.lineWidth = 1;
+      ctx.strokeStyle = col;
+      ctx.stroke();
+      ctx.fillStyle = "rgba(226,232,240,0.92)";
+      ctx.fillText(s.label, bx + padX, by + bh / 2 + 0.5);
+      ctx.fillStyle = col;
+      ctx.fillText(val, bx + padX + nameW + gap, by + bh / 2 + 0.5);
+      ctx.textBaseline = "alphabetic";
+      markers.push({ id: s.id, x: pr.x, y: pr.y, r: rad + 8 });
     });
   }
 

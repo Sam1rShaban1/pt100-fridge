@@ -2,13 +2,34 @@ import { cssTempColor, drawLegend, createModel3D } from "./viz.js";
 
 const fmt1 = (v) => v == null || isNaN(v) ? "--.-" : Number(v).toFixed(1);
 
+function tweenNumber(el, value, suffix = "°", dur = 420) {
+  if (!el) return;
+  if (value == null || isNaN(value)) { el.textContent = "--.-" + suffix; el.dataset.v = ""; return; }
+  const prev = parseFloat(el.dataset.v);
+  const from = isNaN(prev) ? value : prev;
+  if (Math.abs(from - value) < 0.12) { el.dataset.v = value; el.textContent = fmt1(value) + suffix; return; }
+  if (window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    el.dataset.v = value; el.textContent = fmt1(value) + suffix; return;
+  }
+  const start = performance.now();
+  el.dataset.v = value;
+  function step(now) {
+    const k = Math.min(1, (now - start) / dur);
+    const e = 1 - Math.pow(1 - k, 3);
+    el.textContent = fmt1(from + (value - from) * e) + suffix;
+    if (k < 1) requestAnimationFrame(step);
+    else el.textContent = fmt1(value) + suffix;
+  }
+  requestAnimationFrame(step);
+}
+
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 const escapeHtml = (s) => String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
 const UP = window.uPlot;
 const AXIS = "rgba(176,190,197,0.55)";
-const GRID = "rgba(255,255,255,0.05)";
+const GRID = "rgba(255,255,255,0.04)";
 const FONT = "11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
 
 const LINE_COLORS = [
@@ -218,6 +239,7 @@ function buildFleet() {
   state.fridges.forEach((room) => {
     const card = document.createElement("button");
     card.className = "fleet-card";
+    card.classList.add("is-loading");
     card.dataset.room = room.id;
     card.innerHTML = `
       <div class="fc-top">
@@ -248,7 +270,7 @@ function updateFleet() {
     const st = roomStatus(room);
     $("[data-dot]", card).className = "fc-dot " + st.level;
     const tempEl = $("[data-temp]", card);
-    tempEl.textContent = st.temp == null ? "--.-°" : fmt1(st.temp) + "°";
+    tweenNumber(tempEl, st.temp, "°");
     tempEl.style.color = st.temp == null ? "var(--mut)" : cssTempColor(st.temp, state.cfg.color_scale.min, state.cfg.color_scale.max);
     $("[data-sub]", card).textContent = st.sub;
     const rep = st.sensorId && state.latest[st.sensorId];
@@ -258,7 +280,40 @@ function updateFleet() {
       const s = state.spark.get(st.sensorId);
       drawSpark(sp, s.xs, s.ys, SPARK_COLOR[st.level] || SPARK_COLOR.ok);
     }
+    if (st.temp != null) card.classList.remove("is-loading");
   });
+}
+
+function buildKPIs() {
+  const el = $("#kpis"); if (!el) return;
+  el.innerHTML = `
+    <div class="kpi"><span class="kpi-label">Avg temp</span><span class="kpi-val num" data-k="avg">--.-°</span></div>
+    <div class="kpi"><span class="kpi-label">Sensors</span><span class="kpi-val num" data-k="sensors">--</span></div>
+    <div class="kpi"><span class="kpi-label">Alarms</span><span class="kpi-val num" data-k="alarms">0</span></div>
+    <div class="kpi"><span class="kpi-label">Last sync</span><span class="kpi-val num" data-k="sync">--</span></div>`;
+}
+
+function updateKPIs() {
+  const avgEl = $('[data-k="avg"]'), snEl = $('[data-k="sensors"]'),
+        alEl = $('[data-k="alarms"]'), syEl = $('[data-k="sync"]');
+  if (!avgEl) return;
+  let sum = 0, n = 0, alarms = 0, offline = 0, last = 0;
+  state.fridges.forEach((room) => {
+    const th = room.thresholds || state.cfg.thresholds;
+    (room.sensors || []).forEach((s) => {
+      const r = state.latest[s.id];
+      if (!r || !r.time || (Date.now() - r.time) > ((state.cfg && state.cfg.stale_after_s) || 15) * 1000) { offline++; return; }
+      if (r.fault || (r.temp != null && r.temp > th.alarm_max)) alarms++;
+      if (r.temp != null) { sum += r.temp; n++; }
+      if (r.time > last) last = r.time;
+    });
+  });
+  const avg = n ? sum / n : null;
+  tweenNumber(avgEl, avg, "°");
+  snEl.textContent = String(n + offline);
+  alEl.textContent = String(alarms);
+  alEl.className = "kpi-val num " + (alarms ? "alarm" : "ok");
+  syEl.textContent = last ? fmtAge(Date.now() - last) : "--";
 }
 
 async function loadSparks() {
@@ -357,6 +412,7 @@ function updateRoomLive() {
   updateSidebar();
   updateHistorySelection();
   updateFleet();
+  updateKPIs();
 }
 
 function chartCardColor(idx) { return LINE_COLORS[idx % LINE_COLORS.length]; }
@@ -407,6 +463,31 @@ async function buildHistory(room) {
   updateHistorySelection();
 }
 
+function bandPlugin(th) {
+  return {
+    hooks: {
+      draw(u) {
+        const ctx = u.ctx;
+        const { top, left, width, height } = u.bbox;
+        const yOf = (v) => Math.max(top, Math.min(top + height, u.valToPos(v, "y", true)));
+        ctx.save();
+        const ya = yOf(th.alarm_max);
+        ctx.fillStyle = "rgba(248,113,113,0.07)";
+        ctx.fillRect(left, top, width, ya - top);
+        const yw = yOf(th.warn_max);
+        ctx.fillStyle = "rgba(251,191,36,0.06)";
+        ctx.fillRect(left, yw, width, ya - yw);
+        const ytx = yOf(th.target_max), ytm = yOf(th.target_min);
+        if (ytx < ytm) {
+          ctx.fillStyle = "rgba(52,211,153,0.09)";
+          ctx.fillRect(left, ytx, width, ytm - ytx);
+        }
+        ctx.restore();
+      }
+    }
+  };
+}
+
 function thresholdPlugin(th) {
   return {
     hooks: {
@@ -434,7 +515,12 @@ function thresholdPlugin(th) {
 function makeChart(host, ch) {
   const room = currentRoom();
   const th = (room.thresholds || state.cfg.thresholds);
-  const fill = ch.color + "1f";
+  const fill = (u) => {
+    const g = u.ctx.createLinearGradient(0, u.bbox.top, 0, u.bbox.top + u.bbox.height);
+    g.addColorStop(0, ch.color + "30");
+    g.addColorStop(1, ch.color + "02");
+    return g;
+  };
   const opts = {
     width: Math.max(host.clientWidth || 480, 220),
     height: 312,
@@ -463,10 +549,11 @@ function makeChart(host, ch) {
       {},
       { stroke: ch.color, width: 1.8, fill: fill, spanGaps: false, points: { show: false } },
     ],
-    plugins: [thresholdPlugin(th)],
+    plugins: [bandPlugin(th), thresholdPlugin(th)],
   };
   const tip = document.createElement("div");
   tip.className = "u-tooltip";
+  tip.style.borderLeftColor = ch.color;
   tip.style.display = "none";
   host.appendChild(tip);
   const fmtTipTime = (x) => new Date(x * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
@@ -539,7 +626,7 @@ function updateHistorySelection() {
     const tEl = $("#hc-temp-" + id, card);
     if (tEl) {
       const stale = isStale(id);
-      tEl.textContent = stale ? "--.-°" : fmt1(r.temp) + "°";
+      tweenNumber(tEl, stale ? null : r.temp, "°");
       tEl.style.color = stale ? "var(--mut)" : cssTempColor(r.temp, state.cfg.color_scale.min, state.cfg.color_scale.max);
     }
   });
@@ -608,10 +695,12 @@ async function boot() {
     state.cfg = { color_scale: { min: -10, max: 15 }, stale_after_s: 15, thresholds: null };
   }
   buildSidebar();
+  buildKPIs();
   if (!state.selectedRoom && state.fridges[0]) state.selectedRoom = state.fridges[0].id;
   renderView();
   buildFleet();
   loadSparks();
+  updateKPIs();
   const rs = $("#range-seg");
   if (rs) rs.addEventListener("click", (e) => {
     const b = e.target.closest(".seg-btn"); if (!b) return;

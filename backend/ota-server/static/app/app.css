@@ -4,27 +4,36 @@
    resources: system font stacks, works on an offline LAN. */
 
 :root {
-  --bg: #0b1015;
-  --panel: #111823;
-  --panel-2: #16202d;
-  --line: rgba(148, 163, 184, 0.14);
-  --line-strong: rgba(148, 163, 184, 0.28);
-  --text: #e2e8f0;
-  --mut: #8fa3b5;
+  --bg: #0a0f15;
+  --panel: #0f1620;
+  --panel-2: #15202d;
+  --panel-3: #1a2735;
+  --line: rgba(148, 163, 184, 0.12);
+  --line-strong: rgba(148, 163, 184, 0.24);
+  --hair: rgba(255, 255, 255, 0.07);
+  --text: #e6edf5;
+  --mut: #93a6b8;
   --accent: #7dd3fc;
   --ok: #34d399;
   --warn: #fbbf24;
   --alarm: #f87171;
   --mono: ui-monospace, "Cascadia Code", "SF Mono", Menlo, Consolas, monospace;
   --sans: system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, sans-serif;
-  --r: 10px;
+  --r: 12px;
+  --r-sm: 8px;
+  --r-pill: 999px;
+  --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px; --s5: 24px; --s6: 32px;
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.35), 0 2px 10px rgba(0, 0, 0, 0.22);
+  --shadow-2: 0 6px 20px rgba(0, 0, 0, 0.45), 0 2px 6px rgba(0, 0, 0, 0.3);
+  --grad-panel: linear-gradient(180deg, rgba(255, 255, 255, 0.025), rgba(255, 255, 255, 0) 55%);
 }
 
 * { box-sizing: border-box; }
 html, body { margin: 0; }
 
 body {
-  background: var(--bg);
+  background:
+    radial-gradient(130% 120% at 50% -10%, #0e1620 0%, var(--bg) 58%);
   color: var(--text);
   font-family: var(--sans);
   font-size: 15px;
@@ -33,6 +42,8 @@ body {
   flex-direction: column;
   min-height: 100dvh;
   overflow-x: hidden;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
 
 .num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
@@ -44,8 +55,10 @@ body {
   gap: 16px;
   height: 56px;
   padding: 0 clamp(14px, 2.5vw, 24px);
-  background: rgba(11, 16, 21, 0.92);
-  border-bottom: 1px solid var(--line);
+  background: rgba(10, 15, 21, 0.72);
+  backdrop-filter: blur(12px) saturate(130%);
+  -webkit-backdrop-filter: blur(12px) saturate(130%);
+  border-bottom: 1px solid var(--hair);
 }
 .brand { display: flex; align-items: center; gap: 12px; min-width: 0; }
 .brand-mark {
@@ -77,9 +90,40 @@ body {
   @keyframes pulse { 50% { opacity: 0.35; } }
 }
 
+/* ---------- KPI summary strip ---------- */
+.kpibar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 0;
+  height: 46px;
+  padding: 0 clamp(14px, 2.5vw, 24px);
+  border-bottom: 1px solid var(--hair);
+  background: linear-gradient(180deg, rgba(255,255,255,0.015), rgba(255,255,255,0));
+  overflow-x: auto;
+}
+.kpi {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 1px;
+  padding: 0 clamp(14px, 2vw, 26px);
+  border-left: 1px solid var(--hair);
+}
+.kpi:first-child { border-left: 0; padding-left: 0; }
+.kpi-label {
+  font-size: 10px; font-weight: 600;
+  letter-spacing: 0.09em; text-transform: uppercase;
+  color: var(--mut);
+}
+.kpi-val { font-size: 16px; font-weight: 650; line-height: 1.1; }
+.kpi-val.ok { color: var(--ok); }
+.kpi-val.alarm { color: var(--alarm); }
+.kpi-val.warn { color: var(--warn); }
+
 /* ---------- shell ---------- */
 .layout {
-  height: calc(100dvh - 56px);
+  height: calc(100dvh - 102px);
   display: grid;
   grid-template-columns: minmax(0, 1fr) 252px;
 }
@@ -270,14 +314,15 @@ body {
 }
 .chart-card {
   width: 100%;
-  background: var(--panel);
+  background: var(--grad-panel), var(--panel);
   border: 1px solid var(--line);
   border-radius: var(--r);
   padding: 10px 12px 4px;
   cursor: pointer;
-  transition: border-color 150ms ease, box-shadow 150ms ease;
+  box-shadow: var(--shadow-1);
+  transition: border-color 160ms ease, box-shadow 160ms ease, transform 160ms ease;
 }
-.chart-card:hover { border-color: var(--line-strong); }
+.chart-card:hover { border-color: var(--line-strong); box-shadow: var(--shadow-2); transform: translateY(-2px); }
 .chart-card.selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
 .chart-card-head {
   display: flex; align-items: baseline; justify-content: space-between;
@@ -301,15 +346,23 @@ body {
   border-top: 1px solid var(--line);
 }
 .fleet-card {
+  position: relative;
   appearance: none; cursor: pointer; text-align: left;
-  background: var(--panel); color: var(--text); font: inherit;
+  background: var(--grad-panel), var(--panel); color: var(--text); font: inherit;
   border: 1px solid var(--line); border-radius: var(--r);
   padding: 12px 14px;
   display: flex; flex-direction: column; gap: 6px;
-  transition: border-color 150ms ease, background 150ms ease;
+  box-shadow: var(--shadow-1);
+  transition: border-color 160ms ease, background 160ms ease, box-shadow 160ms ease, transform 160ms ease;
 }
-.fleet-card:hover { border-color: var(--line-strong); background: var(--panel-2); }
+.fleet-card:hover { border-color: var(--line-strong); background: var(--grad-panel), var(--panel-2); box-shadow: var(--shadow-2); transform: translateY(-2px); }
 .fleet-card:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.fleet-card.is-loading::after {
+  content: ""; position: absolute; inset: 0; border-radius: var(--r);
+  background: linear-gradient(90deg, rgba(255,255,255,0.03) 25%, rgba(255,255,255,0.08) 37%, rgba(255,255,255,0.03) 63%);
+  background-size: 200% 100%;
+  animation: shimmer 1.4s ease infinite;
+}
 .fc-top { display: flex; align-items: center; gap: 8px; }
 .fc-dot { width: 9px; height: 9px; border-radius: 50%; flex: none; background: var(--mut); }
 .fc-dot.ok { background: var(--ok); }
@@ -327,19 +380,24 @@ body {
   z-index: 5;
   transform: translate(-50%, calc(-100% - 12px));
   pointer-events: none;
-  background: #0b0e14;
+  background: rgba(10, 14, 20, 0.82);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
   border: 1px solid var(--line-strong);
-  border-radius: 7px;
-  padding: 5px 8px;
+  border-left: 2px solid var(--accent);
+  border-radius: 8px;
+  padding: 5px 9px;
   font-family: var(--mono);
   font-size: 12px;
   line-height: 1.35;
   color: var(--text);
   white-space: nowrap;
-  box-shadow: 0 6px 18px rgba(0,0,0,0.45);
+  box-shadow: 0 8px 22px rgba(0,0,0,0.5);
 }
 .u-tooltip b { font-weight: 650; }
 .u-tooltip span { display: block; color: var(--mut); font-size: 11px; }
+
+@keyframes shimmer { 100% { background-position: -200% 0; } }
 
 .u-select {
   background: rgba(125, 211, 252, 0.12);
@@ -350,6 +408,7 @@ body {
 /* ---------- mobile ---------- */
 @media (max-width: 900px) {
   body { height: auto; min-height: 100dvh; overflow: auto; }
+  .kpibar { display: none; }
   .layout { grid-template-columns: 1fr; height: auto; }
   .sidebar {
     order: -1;
