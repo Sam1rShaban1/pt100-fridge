@@ -91,45 +91,32 @@ def query_latest(sensor_ids, window_minutes=10):
     return out
 
 
-def query_history(sensor_ids, minutes=60, points=90):
-    """Downsampled temperature series -> {sid: [[ms, temp], ...]}.
+def query_history(sensor_ids, minutes=60, points=60000):
+    """Temperature series at (near) raw DB granularity -> {sid: [[ms, temp], ...]}.
 
-    Uses date_bin when available and falls back to a raw capped query so the
-    endpoint still works on builds without date_bin.
+    Returns real stored samples up to RAW_LIMIT per sensor. For short windows
+    this is exactly the DB resolution; for very long windows it is capped so
+    payloads stay reasonable. The `points` argument is only a ceiling.
     """
+    RAW_LIMIT = max(1000, min(int(points), 120000))
     series = {}
     mins = max(1, int(minutes))
-    pts = max(10, min(int(points), 400))
-    bin_secs = max(int(mins * 60 / pts), 1)
     for sid in sensor_ids:
         sql = (
-            f"SELECT date_bin(INTERVAL '{bin_secs} seconds', time) AS bucket, "
-            f"avg(temp) AS temp FROM pt100 "
+            f"SELECT time, temp FROM pt100 "
             f"WHERE sensor_id = {_quote(sid)} "
             f"AND time >= now() - INTERVAL '{mins} minutes' "
-            f"GROUP BY bucket ORDER BY bucket"
+            f"ORDER BY time ASC LIMIT {RAW_LIMIT}"
         )
         arr = []
         try:
             rows = _query(sql)
         except Exception:
-            # Fallback: raw points capped, bucketed here.
-            sql = (
-                f"SELECT time, temp FROM pt100 "
-                f"WHERE sensor_id = {_quote(sid)} "
-                f"AND time >= now() - INTERVAL '{mins} minutes' "
-                f"ORDER BY time ASC LIMIT 5000"
-            )
-            try:
-                rows = _query(sql)
-            except Exception:
-                series[sid] = []
-                continue
-            step = max(1, len(rows) // pts)
-            rows = rows[::step]
+            series[sid] = []
+            continue
         for row in rows:
             t = row.get("temp")
-            ts = _ms(row.get("bucket") or row.get("time"))
+            ts = _ms(row.get("time"))
             if t is None or ts is None:
                 continue
             arr.append([ts, round(float(t), 2)])

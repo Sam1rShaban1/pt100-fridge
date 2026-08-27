@@ -352,7 +352,7 @@ async function loadRange(rangeMin, room) {
   if (!missing.length) return;
   try {
     const ids = missing.map(s => s.id).join(",");
-    const series = await api(`/api/readings/history?ids=${encodeURIComponent(ids)}&minutes=${rangeMin}&points=600`);
+    const series = await api(`/api/readings/history?ids=${encodeURIComponent(ids)}&minutes=${rangeMin}&points=120000`);
     Object.entries((series.series) || {}).forEach(([id, rows]) => {
       state.cache.set(`${id}|${rangeMin}`, { xs: rows.map((r) => Math.round(r[0] / 1000)), ys: rows.map((r) => r[1]) });
     });
@@ -509,16 +509,26 @@ function heatPlugin(ch) {
         const xs = ch.xs, ys = ch.ys;
         if (!xs || xs.length < 2) return;
         const cs = state.cfg.color_scale;
-        // Smooth vertical gradient keyed to each point's actual temperature,
+        // Decimate for drawing/gradient so raw-resolution data (tens of
+        // thousands of points) stays smooth and fast.
+        const stride = Math.max(1, Math.floor(xs.length / 2000));
+        // Smooth vertical gradient keyed to sampled points' temperatures,
         // so the fill reads as "the color of that temp" yet stays continuous.
         const grad = ctx.createLinearGradient(0, top, 0, bot);
         const stops = [];
-        for (let i = 0; i < xs.length; i++) {
+        for (let i = 0; i < xs.length; i += stride) {
           const y = u.valToPos(ys[i], "y", true);
           if (!isFinite(y)) continue;
           let off = (y - top) / height;
           off = Math.max(0, Math.min(1, off));
           stops.push([off, tempColor(ys[i], cs.min, cs.max)]);
+        }
+        const last = xs.length - 1;
+        const yl = u.valToPos(ys[last], "y", true);
+        if (isFinite(yl)) {
+          let off = (yl - top) / height;
+          off = Math.max(0, Math.min(1, off));
+          stops.push([off, tempColor(ys[last], cs.min, cs.max)]);
         }
         stops.push([0, tempColor(cs.max, cs.min, cs.max)]);
         stops.push([1, tempColor(cs.min, cs.min, cs.max)]);
@@ -534,10 +544,10 @@ function heatPlugin(ch) {
         ctx.beginPath();
         ctx.rect(left, top, width, height);
         ctx.clip();
-        // Filled area as one continuous path.
+        // Filled area as one continuous (decimated) path.
         let started = false, lastX = left;
         ctx.beginPath();
-        for (let i = 0; i < xs.length; i++) {
+        for (let i = 0; i < xs.length; i += stride) {
           const px = u.valToPos(xs[i], "x", true);
           const y = u.valToPos(ys[i], "y", true);
           if (!isFinite(y) || !isFinite(px)) continue;
@@ -556,7 +566,7 @@ function heatPlugin(ch) {
         // Smooth line on top, same gradient.
         ctx.beginPath();
         started = false;
-        for (let i = 0; i < xs.length; i++) {
+        for (let i = 0; i < xs.length; i += stride) {
           const px = u.valToPos(xs[i], "x", true);
           const y = u.valToPos(ys[i], "y", true);
           if (!isFinite(y) || !isFinite(px)) continue;
