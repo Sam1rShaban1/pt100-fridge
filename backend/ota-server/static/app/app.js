@@ -692,7 +692,7 @@ async function boot() {
     state.cfg = { color_scale: data.color_scale, stale_after_s: data.stale_after_s || 15, thresholds: null };
   } catch (e) {
     state.fridges = [];
-    state.cfg = { color_scale: { min: -10, max: 15 }, stale_after_s: 15, thresholds: null };
+    state.cfg = { color_scale: { min: -50, max: 20 }, stale_after_s: 15, thresholds: null };
   }
   buildSidebar();
   buildKPIs();

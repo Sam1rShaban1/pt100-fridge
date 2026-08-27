@@ -3,13 +3,14 @@
    particle animation. Pure canvas, no dependencies. */
 
 export function tempColor(t, min, max) {
-  // Chiller-focused scale: 4 bands, smooth interpolation between anchors.
+  // Cold-to-warm scale spanning -50..20C, smooth interpolation between anchors.
   const stops = [
-    [-10, [26, 42, 92]],    // deep navy (well below freezing)
-    [-5,  [43, 87, 196]],   // blue
-    [0,   [42, 163, 201]],  // cyan (setpoint low)
-    [5,   [56, 217, 150]],  // green (setpoint high)
-    [15,  [227, 91, 52]],   // red (alarm / warm)
+    [-50, [33, 38, 120]],   // deep indigo (extreme cold)
+    [-20, [40, 90, 210]],   // blue
+    [0,   [38, 175, 205]],  // cyan
+    [8,   [54, 210, 150]],  // green
+    [14,  [240, 190, 60]],  // amber
+    [20,  [225, 70, 45]],   // red (warm)
   ];
   let a = stops[0], b = stops[stops.length - 1];
   for (let i = 0; i < stops.length - 1; i++) {
