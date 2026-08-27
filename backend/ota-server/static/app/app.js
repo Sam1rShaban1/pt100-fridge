@@ -1,9 +1,8 @@
-import { cssTempColor, drawLegend, createModel3D } from "./viz.js";
+import { cssTempColor, drawLegend, createModel3D, tempColor } from "./viz.js";
 
 const fmt1 = (v) => v == null || isNaN(v) ? "--.-" : Number(v).toFixed(1);
 
-function tweenNumber(el, value, suffix = "°", dur = 420) {
-  if (!el) return;
+function tweenNumber(el, value, suffix = "°", dur = 420) {  if (!el) return;
   if (value == null || isNaN(value)) { el.textContent = "--.-" + suffix; el.dataset.v = ""; return; }
   const prev = parseFloat(el.dataset.v);
   const from = isNaN(prev) ? value : prev;
@@ -21,6 +20,12 @@ function tweenNumber(el, value, suffix = "°", dur = 420) {
     else el.textContent = fmt1(value) + suffix;
   }
   requestAnimationFrame(step);
+}
+
+function tempRGBA(t, a) {
+  const c = tempColor(t, state.cfg.color_scale.min, state.cfg.color_scale.max);
+  const m = c.match(/\d+/g);
+  return `rgba(${m[0]},${m[1]},${m[2]},${a})`;
 }
 
 const $ = (s, r = document) => r.querySelector(s);
@@ -515,10 +520,13 @@ function thresholdPlugin(th) {
 function makeChart(host, ch) {
   const room = currentRoom();
   const th = (room.thresholds || state.cfg.thresholds);
+  const cs = state.cfg.color_scale;
+  const t0 = ch.ys[ch.ys.length - 1];
+  const lineCol = (t0 != null) ? tempColor(t0, cs.min, cs.max) : "#7dd3fc";
   const fill = (u) => {
     const g = u.ctx.createLinearGradient(0, u.bbox.top, 0, u.bbox.top + u.bbox.height);
-    g.addColorStop(0, ch.color + "30");
-    g.addColorStop(1, ch.color + "02");
+    g.addColorStop(0, tempRGBA(cs.max, 0.22));
+    g.addColorStop(1, tempRGBA(cs.min, 0.02));
     return g;
   };
   const opts = {
@@ -526,7 +534,7 @@ function makeChart(host, ch) {
     height: 312,
     padding: [12, 14, 26, 42],
     cursor: {
-      points: { size: 5, width: 2, stroke: ch.color, fill: "#0d1117" },
+      points: { size: 5, width: 2, stroke: lineCol, fill: "#0d1117" },
       drag: { x: true, y: false },
     },
     legend: { show: false },
@@ -547,13 +555,13 @@ function makeChart(host, ch) {
     ],
     series: [
       {},
-      { stroke: ch.color, width: 1.8, fill: fill, spanGaps: false, points: { show: false } },
+      { stroke: lineCol, width: 1.8, fill: fill, spanGaps: false, points: { show: false } },
     ],
     plugins: [bandPlugin(th), thresholdPlugin(th)],
   };
   const tip = document.createElement("div");
   tip.className = "u-tooltip";
-  tip.style.borderLeftColor = ch.color;
+  tip.style.borderLeftColor = lineCol;
   tip.style.display = "none";
   host.appendChild(tip);
   const fmtTipTime = (x) => new Date(x * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
@@ -598,6 +606,7 @@ function queueLive(id, t, temp) {
 
 function flushLive() {
   state.livePending = false;
+  const cs = state.cfg.color_scale;
   const cutoff = Math.floor(Date.now() / 1000) - state.rangeMin * 60;
   state.liveQueue.forEach((pts, id) => {
     const ch = state.charts.get(id);
@@ -606,6 +615,8 @@ function flushLive() {
     while (ch.xs.length && ch.xs[0] < cutoff) { ch.xs.shift(); ch.ys.shift(); }
     if (ch.u) {
       const u = ch.u;
+      const lt = state.latest[id];
+      if (lt && lt.temp != null) u.series[1].stroke = tempColor(lt.temp, cs.min, cs.max);
       const dMin = ch.xs[0], dMax = ch.xs[ch.xs.length - 1];
       const sMin = u.scales.x.min, sMax = u.scales.x.max;
       const zoomed = sMin != null && sMax != null &&
