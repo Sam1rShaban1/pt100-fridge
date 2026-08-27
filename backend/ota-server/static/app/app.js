@@ -468,6 +468,44 @@ async function buildHistory(room) {
   updateHistorySelection();
 }
 
+function heatPlugin(ch) {
+  return {
+    hooks: {
+      draw(u) {
+        const ctx = u.ctx;
+        const { top, left, width, height } = u.bbox;
+        const bot = top + height;
+        const xs = ch.xs, ys = ch.ys;
+        if (!xs || xs.length < 2) return;
+        const cs = state.cfg.color_scale;
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(left, top, width, height);
+        ctx.clip();
+        for (let i = 0; i < xs.length; i++) {
+          const px = u.valToPos(xs[i], "x", true);
+          const y = u.valToPos(ys[i], "y", true);
+          if (!isFinite(y) || !isFinite(px)) continue;
+          const yy = Math.max(top, Math.min(bot, y));
+          ctx.fillStyle = tempRGBA(ys[i], 0.42);
+          ctx.fillRect(px - 0.8, yy, 1.7, bot - yy);
+        }
+        ctx.lineWidth = 1.8;
+        ctx.lineJoin = "round";
+        ctx.lineCap = "round";
+        for (let i = 1; i < xs.length; i++) {
+          const x0 = u.valToPos(xs[i - 1], "x", true), y0 = u.valToPos(ys[i - 1], "y", true);
+          const x1 = u.valToPos(xs[i], "x", true), y1 = u.valToPos(ys[i], "y", true);
+          if (!isFinite(y0) || !isFinite(y1)) continue;
+          ctx.strokeStyle = tempColor((ys[i - 1] + ys[i]) / 2, cs.min, cs.max);
+          ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
+        }
+        ctx.restore();
+      }
+    }
+  };
+}
+
 function bandPlugin(th) {
   return {
     hooks: {
@@ -523,18 +561,12 @@ function makeChart(host, ch) {
   const cs = state.cfg.color_scale;
   const t0 = ch.ys[ch.ys.length - 1];
   const lineCol = (t0 != null) ? tempColor(t0, cs.min, cs.max) : "#7dd3fc";
-  const fill = (u) => {
-    const g = u.ctx.createLinearGradient(0, u.bbox.top, 0, u.bbox.top + u.bbox.height);
-    g.addColorStop(0, tempRGBA(cs.max, 0.22));
-    g.addColorStop(1, tempRGBA(cs.min, 0.02));
-    return g;
-  };
   const opts = {
     width: Math.max(host.clientWidth || 480, 220),
     height: 312,
     padding: [12, 14, 26, 42],
     cursor: {
-      points: { size: 5, width: 2, stroke: lineCol, fill: "#0d1117" },
+      points: { size: 5, width: 2, stroke: "rgba(230,237,245,0.95)", fill: "#0d1117" },
       drag: { x: true, y: false },
     },
     legend: { show: false },
@@ -555,9 +587,9 @@ function makeChart(host, ch) {
     ],
     series: [
       {},
-      { stroke: lineCol, width: 1.8, fill: fill, spanGaps: false, points: { show: false } },
+      { stroke: "rgba(0,0,0,0)", width: 1.8, fill: false, spanGaps: false, points: { show: false } },
     ],
-    plugins: [bandPlugin(th), thresholdPlugin(th)],
+    plugins: [bandPlugin(th), heatPlugin(ch), thresholdPlugin(th)],
   };
   const tip = document.createElement("div");
   tip.className = "u-tooltip";
@@ -606,7 +638,6 @@ function queueLive(id, t, temp) {
 
 function flushLive() {
   state.livePending = false;
-  const cs = state.cfg.color_scale;
   const cutoff = Math.floor(Date.now() / 1000) - state.rangeMin * 60;
   state.liveQueue.forEach((pts, id) => {
     const ch = state.charts.get(id);
@@ -615,8 +646,6 @@ function flushLive() {
     while (ch.xs.length && ch.xs[0] < cutoff) { ch.xs.shift(); ch.ys.shift(); }
     if (ch.u) {
       const u = ch.u;
-      const lt = state.latest[id];
-      if (lt && lt.temp != null) u.series[1].stroke = tempColor(lt.temp, cs.min, cs.max);
       const dMin = ch.xs[0], dMax = ch.xs[ch.xs.length - 1];
       const sMin = u.scales.x.min, sMax = u.scales.x.max;
       const zoomed = sMin != null && sMax != null &&
