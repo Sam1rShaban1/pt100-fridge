@@ -138,6 +138,12 @@ function updateSidebar() {
 
 function currentRoom() { return state.fridges.find(f => f.id === state.selectedRoom); }
 
+function roomDims(room) {
+  const d = room.dims_m;
+  if (!d) return "";
+  return `${fmt1(d.length)} × ${fmt1(d.width)} × ${fmt1(d.height)} m`;
+}
+
 function selectSensor(roomId, sensorId) {
   state.selectedRoom = roomId;
   state.openRooms.add(roomId);
@@ -156,7 +162,7 @@ function renderView() {
     <div class="room-head">
       <div>
         <h2>${escapeHtml(room.name)}</h2>
-        <p>${escapeHtml(room.dims)}</p>
+        <p>${escapeHtml(roomDims(room))}</p>
       </div>
     </div>
     <div class="alarm-banner" id="banner"></div>
@@ -191,19 +197,33 @@ function updateRoomLive() {
   paintField(room);
   const th = room.thresholds || state.cfg.thresholds;
   const banner = $("#banner");
-  let worst = null, worstTemp = null;
-  (room.sensors || []).forEach(s => {
+  const sensors = room.sensors || [];
+  let faultLabel = null, worst = null, worstTemp = null, offline = 0;
+  sensors.forEach(s => {
     const r = state.latest[s.id];
-    if (!r || r.fault) { worst = worst || "fault"; }
-    else if (r.temp != null) {
+    if (!r) { offline++; return; }
+    if (r.fault) { faultLabel = faultLabel || s.label; return; }
+    if (r.temp != null) {
       if (r.temp > th.alarm_max && (!worstTemp || r.temp > worstTemp)) { worst = "alarm"; worstTemp = r.temp; }
       else if (r.temp > th.warn_max && worst !== "alarm") { worst = "warn"; }
     }
   });
-  if (!worst) { banner.className = "alarm-banner"; banner.textContent = "All sensors within target range"; }
-  else if (worst === "alarm") { banner.className = "alarm-banner alarm"; banner.textContent = `ALARM: ${fmt1(worstTemp)}°C exceeds ${fmt1(th.alarm_max)}°C`; }
-  else if (worst === "warn") { banner.className = "alarm-banner warn"; banner.textContent = `Warning: temperature above ${fmt1(th.warn_max)}°C`; }
-  else { banner.className = "alarm-banner warn"; banner.textContent = "Sensor fault detected"; }
+  if (faultLabel) {
+    banner.className = "alarm-banner alarm";
+    banner.textContent = `Sensor fault detected: ${faultLabel}`;
+  } else if (worst === "alarm") {
+    banner.className = "alarm-banner alarm";
+    banner.textContent = `ALARM: ${fmt1(worstTemp)}°C exceeds ${fmt1(th.alarm_max)}°C`;
+  } else if (worst === "warn") {
+    banner.className = "alarm-banner warn";
+    banner.textContent = `Warning: temperature above ${fmt1(th.warn_max)}°C`;
+  } else if (offline > 0 && offline === sensors.length) {
+    banner.className = "alarm-banner";
+    banner.textContent = "Waiting for sensor data…";
+  } else {
+    banner.className = "alarm-banner";
+    banner.textContent = "All sensors within target range";
+  }
   updateSidebar();
   updateHistorySelection();
 }
@@ -313,6 +333,25 @@ function makeChart(host, ch) {
       { stroke: ch.color, width: 1.8, fill: fill, spanGaps: false, points: { show: false } },
     ],
     plugins: [thresholdPlugin(th)],
+  };
+  const tip = document.createElement("div");
+  tip.className = "u-tooltip";
+  tip.style.display = "none";
+  host.appendChild(tip);
+  const fmtTipTime = (x) => new Date(x * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  opts.hooks = {
+    setCursor: [(u) => {
+      const idx = u.cursor.idx;
+      if (idx == null) { tip.style.display = "none"; return; }
+      const x = u.data[0][idx], y = u.data[1][idx];
+      if (y == null) { tip.style.display = "none"; return; }
+      tip.innerHTML = `<b>${fmt1(y)}°C</b><span>${fmtTipTime(x)}</span>`;
+      tip.style.display = "block";
+      const hr = host.getBoundingClientRect();
+      const or = u.over.getBoundingClientRect();
+      tip.style.left = (or.left - hr.left + u.cursor.left) + "px";
+      tip.style.top = (or.top - hr.top + u.cursor.top) + "px";
+    }],
   };
   const u = new UP(opts, [ch.xs, ch.ys], host);
   sizeChart(ch);
