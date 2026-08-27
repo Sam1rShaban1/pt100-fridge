@@ -49,6 +49,9 @@ const MINUTES = [
   { v: 1440, label: "24h" },
 ];
 
+const CACHE_MIN = 1440;
+const CACHE_POINTS = 2000;
+
 const state = {
   fridges: [],
   cfg: null,
@@ -60,6 +63,7 @@ const state = {
   openRooms: new Set(),
   charts: new Map(),
   spark: new Map(),
+  cache: new Map(),
   liveQueue: new Map(),
   livePending: false,
   lastNet: 0,
@@ -343,6 +347,37 @@ function pushLiveSpark(id, x, y) {
   while (s.xs.length && s.xs[0] < cutoff) { s.xs.shift(); s.ys.shift(); }
 }
 
+async function loadAllHistory() {
+  const ids = [];
+  state.fridges.forEach((r) => (r.sensors || []).forEach((s) => ids.push(s.id)));
+  if (!ids.length) return;
+  try {
+    const series = await api(`/api/readings/history?ids=${encodeURIComponent(ids.join(","))}&minutes=${CACHE_MIN}&points=${CACHE_POINTS}`);
+    Object.entries((series.series) || {}).forEach(([id, rows]) => {
+      state.cache.set(id, { xs: rows.map((r) => Math.round(r[0] / 1000)), ys: rows.map((r) => r[1]) });
+    });
+  } catch (e) { /* offline */ }
+}
+
+function cacheWindow(id, rangeMin) {
+  const c = state.cache.get(id);
+  if (!c || !c.xs.length) return { xs: [], ys: [] };
+  const cutoff = Math.floor(Date.now() / 1000) - rangeMin * 60;
+  const xs = [], ys = [];
+  for (let i = 0; i < c.xs.length; i++) {
+    if (c.xs[i] >= cutoff) { xs.push(c.xs[i]); ys.push(c.ys[i]); }
+  }
+  return { xs, ys };
+}
+
+function pushLiveCache(id, x, y) {
+  let c = state.cache.get(id);
+  if (!c) { c = { xs: [], ys: [] }; state.cache.set(id, c); }
+  c.xs.push(x); c.ys.push(y);
+  const cutoff = Math.floor(Date.now() / 1000) - CACHE_MIN * 60;
+  while (c.xs.length && c.xs[0] < cutoff) { c.xs.shift(); c.ys.shift(); }
+}
+
 function renderView() {
   const room = currentRoom();
   const view = $("#view");
@@ -436,13 +471,18 @@ async function buildHistory(room) {
   grid.innerHTML = "";
   if (sensors.length === 0) { grid.innerHTML = `<p class="empty-note">No sensors assigned to this room.</p>`; return; }
 
-  let series = {};
-  try {
-    const ids = sensors.map(s => s.id).join(",");
-    series = await api(`/api/readings/history?ids=${encodeURIComponent(ids)}&minutes=${state.rangeMin}&points=600`);
-  } catch (e) { /* keep empty */ }
+  // One server fetch at most: backfill the local cache for any missing sensor.
+  const missing = sensors.filter(s => !state.cache.has(s.id));
+  if (missing.length) {
+    try {
+      const ids = missing.map(s => s.id).join(",");
+      const series = await api(`/api/readings/history?ids=${encodeURIComponent(ids)}&minutes=${CACHE_MIN}&points=${CACHE_POINTS}`);
+      Object.entries((series.series) || {}).forEach(([id, rows]) => {
+        state.cache.set(id, { xs: rows.map(r => Math.round(r[0] / 1000)), ys: rows.map(r => r[1]) });
+      });
+    } catch (e) { /* keep what we have */ }
+  }
 
-  const seconds = state.rangeMin * 60;
   sensors.forEach((s, idx) => {
     const card = document.createElement("div");
     card.className = "chart-card" + (state.selectedSensor === s.id ? " selected" : "");
@@ -456,14 +496,27 @@ async function buildHistory(room) {
     card.addEventListener("click", () => selectSensor(room.id, s.id));
     grid.appendChild(card);
 
-    const rows = (series.series && series.series[s.id]) || [];
-    const xs = rows.map(r => Math.round(r[0] / 1000));
-    const ys = rows.map(r => r[1]);
+    const w = cacheWindow(s.id, state.rangeMin);
     const host = $("#chart-" + s.id, card);
-    const ch = { id: s.id, color: chartCardColor(idx), xs, ys, el: host, u: null };
+    const ch = { id: s.id, color: chartCardColor(idx), xs: w.xs, ys: w.ys, el: host, u: null };
     state.charts.set(s.id, ch);
-    if (xs.length) { host.innerHTML = ""; ch.u = makeChart(host, ch); }
+    if (w.xs.length) { host.innerHTML = ""; ch.u = makeChart(host, ch); }
     observeChart(ch);
+  });
+  updateHistorySelection();
+}
+
+function updateHistoryRange() {
+  state.charts.forEach((ch, id) => {
+    const w = cacheWindow(id, state.rangeMin);
+    ch.xs = w.xs; ch.ys = w.ys;
+    if (ch.u) {
+      const u = ch.u;
+      const dMin = ch.xs[0], dMax = ch.xs[ch.xs.length - 1];
+      const sMin = u.scales.x.min, sMax = u.scales.x.max;
+      const zoomed = sMin != null && sMax != null && (sMin > dMin + 1e-6 || sMax < dMax - 1e-6);
+      u.setData([ch.xs, ch.ys], !zoomed);
+    }
   });
   updateHistorySelection();
 }
@@ -478,28 +531,66 @@ function heatPlugin(ch) {
         const xs = ch.xs, ys = ch.ys;
         if (!xs || xs.length < 2) return;
         const cs = state.cfg.color_scale;
+        // Smooth vertical gradient keyed to each point's actual temperature,
+        // so the fill reads as "the color of that temp" yet stays continuous.
+        const grad = ctx.createLinearGradient(0, top, 0, bot);
+        const stops = [];
+        for (let i = 0; i < xs.length; i++) {
+          const y = u.valToPos(ys[i], "y", true);
+          if (!isFinite(y)) continue;
+          let off = (y - top) / height;
+          off = Math.max(0, Math.min(1, off));
+          stops.push([off, tempColor(ys[i], cs.min, cs.max)]);
+        }
+        stops.push([0, tempColor(cs.max, cs.min, cs.max)]);
+        stops.push([1, tempColor(cs.min, cs.min, cs.max)]);
+        stops.sort((a, b) => a[0] - b[0]);
+        let lastOff = -1;
+        for (const [off, col] of stops) {
+          const o = Math.max(0, Math.min(1, off));
+          if (Math.abs(o - lastOff) < 1e-4) continue;
+          grad.addColorStop(o, col);
+          lastOff = o;
+        }
         ctx.save();
         ctx.beginPath();
         ctx.rect(left, top, width, height);
         ctx.clip();
+        // Filled area as one continuous path.
+        let started = false, lastX = left;
+        ctx.beginPath();
         for (let i = 0; i < xs.length; i++) {
           const px = u.valToPos(xs[i], "x", true);
           const y = u.valToPos(ys[i], "y", true);
           if (!isFinite(y) || !isFinite(px)) continue;
           const yy = Math.max(top, Math.min(bot, y));
-          ctx.fillStyle = tempRGBA(ys[i], 0.42);
-          ctx.fillRect(px - 0.8, yy, 1.7, bot - yy);
+          if (!started) { ctx.moveTo(px, yy); started = true; }
+          else ctx.lineTo(px, yy);
+          lastX = px;
         }
+        if (started) {
+          ctx.lineTo(lastX, bot);
+          ctx.lineTo(left, bot);
+          ctx.closePath();
+          ctx.fillStyle = grad;
+          ctx.fill();
+        }
+        // Smooth line on top, same gradient.
+        ctx.beginPath();
+        started = false;
+        for (let i = 0; i < xs.length; i++) {
+          const px = u.valToPos(xs[i], "x", true);
+          const y = u.valToPos(ys[i], "y", true);
+          if (!isFinite(y) || !isFinite(px)) continue;
+          const yy = Math.max(top, Math.min(bot, y));
+          if (!started) { ctx.moveTo(px, yy); started = true; }
+          else ctx.lineTo(px, yy);
+        }
+        ctx.strokeStyle = grad;
         ctx.lineWidth = 1.8;
         ctx.lineJoin = "round";
         ctx.lineCap = "round";
-        for (let i = 1; i < xs.length; i++) {
-          const x0 = u.valToPos(xs[i - 1], "x", true), y0 = u.valToPos(ys[i - 1], "y", true);
-          const x1 = u.valToPos(xs[i], "x", true), y1 = u.valToPos(ys[i], "y", true);
-          if (!isFinite(y0) || !isFinite(y1)) continue;
-          ctx.strokeStyle = tempColor((ys[i - 1] + ys[i]) / 2, cs.min, cs.max);
-          ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
-        }
+        ctx.stroke();
         ctx.restore();
       }
     }
@@ -684,6 +775,7 @@ function onLive(evt) {
   state.latest[s.sensor_id] = { temp: s.temp, resistance: s.resistance, fault: s.fault, time: Date.now() };
   queueLive(s.sensor_id, Date.now(), s.temp);
   pushLiveSpark(s.sensor_id, Math.round(Date.now() / 1000), s.temp);
+  pushLiveCache(s.sensor_id, Math.round(Date.now() / 1000), s.temp);
   updateRoomLive();
 }
 
@@ -737,6 +829,7 @@ async function boot() {
   buildSidebar();
   buildKPIs();
   if (!state.selectedRoom && state.fridges[0]) state.selectedRoom = state.fridges[0].id;
+  await loadAllHistory();
   renderView();
   buildFleet();
   loadSparks();
@@ -746,7 +839,7 @@ async function boot() {
     const b = e.target.closest(".seg-btn"); if (!b) return;
     state.rangeMin = Number(b.dataset.min);
     $$("#range-seg .seg-btn").forEach(x => x.classList.toggle("active", x === b));
-    buildHistory(currentRoom());
+    updateHistoryRange();
   });
   connectSSE();
   setInterval(pollServer, 4000);
