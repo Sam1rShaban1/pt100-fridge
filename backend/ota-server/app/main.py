@@ -259,9 +259,6 @@ async def stream(req: Request):
 
 
 # ---------------- endpoints ----------------
-@app.get("/", response_class=HTMLResponse)
-def index():
-    return (Path(__file__).parent.parent / "static" / "index.html").read_text()
 
 
 @app.post("/api/firmware")
@@ -336,6 +333,11 @@ app.mount(
     "/app",
     StaticFiles(directory=str(_DASHBOARD_DIR), html=True),
     name="dashboard",
+)
+app.mount(
+    "/",
+    StaticFiles(directory=str(_DASHBOARD_DIR), html=True),
+    name="root",
 )
 
 
