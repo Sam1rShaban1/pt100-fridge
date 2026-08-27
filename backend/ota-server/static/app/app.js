@@ -494,13 +494,7 @@ async function updateHistoryRange() {
     const w = state.cache.get(`${id}|${state.rangeMin}`);
     if (!w) return;
     ch.xs = w.xs; ch.ys = w.ys;
-    if (ch.u) {
-      const u = ch.u;
-      const dMin = ch.xs[0], dMax = ch.xs[ch.xs.length - 1];
-      const sMin = u.scales.x.min, sMax = u.scales.x.max;
-      const zoomed = sMin != null && sMax != null && (sMin > dMin + 1e-6 || sMax < dMax - 1e-6);
-      u.setData([ch.xs, ch.ys], !zoomed);
-    }
+    if (ch.u) ch.u.setData([ch.xs, ch.ys], true);
   });
   updateHistorySelection();
 }
