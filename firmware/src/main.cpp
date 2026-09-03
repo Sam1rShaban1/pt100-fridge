@@ -3,6 +3,7 @@
 #include "sensors.h"
 #include "mqtt.h"
 #include "ota.h"
+#include "wifi.h"
 
 #include <ArduinoJson.h>
 #include <WiFi.h>
@@ -11,15 +12,23 @@ SensorArray sensors;
 
 void setup() {
   Serial.begin(115200);
+  delay(200);
+  Serial.printf("\n=== %s %s group=%s ===\n", DEVICE_ID, FW_VERSION, GROUP);
 
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
+  wifiInit();
+  // Don't block on WiFi — the wifi manager will reconnect in loop().
+  // Give it a brief window to associate so first boot logs are useful.
+  unsigned long t0 = millis();
+  while (!wifiIsConnected() && millis() - t0 < 4000) {
+    wifiLoop();
+    delay(100);
   }
-  Serial.println("\nWiFi connected");
-  Serial.print("IP=");  Serial.println(WiFi.localIP());
-  Serial.print("GW=");  Serial.println(WiFi.gatewayIP());
+  if (wifiIsConnected()) {
+    Serial.print("WiFi connected IP=");  Serial.println(WiFi.localIP());
+    Serial.print("GW=");  Serial.println(WiFi.gatewayIP());
+  } else {
+    Serial.println("WiFi not yet connected — will retry in background");
+  }
   Serial.print("MQTT target="); Serial.print(MQTT_BROKER); Serial.print(":"); Serial.println(MQTT_PORT);
 
   // Build the sensor list from SENSOR_DEFS in config.h
@@ -42,6 +51,7 @@ unsigned long lastPub = 0;
 unsigned long lastPoll = 0;
 
 void loop() {
+  wifiLoop();
   mqttLoop();
 
   unsigned long now = millis();
@@ -65,7 +75,15 @@ void loop() {
 
   if (now - lastPoll >= OTA_POLL_MS) {
     lastPoll = now;
-    otaCheckManifest();
+    if (wifiIsConnected()) otaCheckManifest();
+  }
+
+  // Optional: periodic WiFi health log (every 30s when disconnected)
+  static unsigned long lastWifiLog = 0;
+  if (!wifiIsConnected() && now - lastWifiLog > 30000) {
+    lastWifiLog = now;
+    Serial.printf("WiFi still disconnected %lus (status=%d)\n",
+                  wifiDisconnectedMs() / 1000, (int)WiFi.status());
   }
 }
 

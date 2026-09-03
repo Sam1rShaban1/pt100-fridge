@@ -1,6 +1,7 @@
 #include "mqtt.h"
 #include "config.h"
 #include "certs.h"
+#include "wifi.h"
 
 #ifdef LOCAL_DEV
 WiFiClient mqttNet;
@@ -26,17 +27,8 @@ void mqttInit() {
   mqtt.setBufferSize(1024);
 }
 
-static void ensureWifi() {
-  if (WiFi.status() == WL_CONNECTED) return;
-  Serial.println("WiFi lost, reconnecting...");
-  WiFi.reconnect();
-  unsigned long t = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - t < 10000) {
-    delay(200);
-  }
-}
-
 bool mqttConnect() {
+  if (!wifiIsConnected()) return false;
   if (mqtt.connected()) return true;
   String id = String("pt100-") + DEVICE_ID;
   String lwtTopic = String("ota/") + DEVICE_ID + "/status";
@@ -54,7 +46,7 @@ bool mqttConnect() {
 }
 
 void mqttLoop() {
-  ensureWifi();
+  if (!wifiIsConnected()) return;
   static unsigned long lastTry = 0;
   if (!mqtt.connected()) {
     unsigned long now = millis();
@@ -68,9 +60,15 @@ void mqttLoop() {
 }
 
 bool mqttPublish(const char* topic, const char* payload, bool retain) {
-  if (!mqtt.connected()) mqttConnect();
+  if (!wifiIsConnected()) return false;
+  if (!mqtt.connected() && !mqttConnect()) return false;
   if (!mqtt.connected()) return false;
-  return mqtt.publish(topic, (const char*)payload, retain);
+  bool ok = mqtt.publish(topic, (const char*)payload, retain);
+  if (!ok) {
+    Serial.printf("MQTT publish failed topic=%s state=%d — resetting client\n", topic, mqtt.state());
+    mqtt.disconnect();
+  }
+  return ok;
 }
 
 void mqttSubscribe(const char* topic) {
