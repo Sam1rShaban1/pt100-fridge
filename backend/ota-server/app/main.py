@@ -3,6 +3,8 @@ import json
 import time
 import asyncio
 import hashlib
+import hmac
+import secrets
 import threading
 from pathlib import Path
 
@@ -19,6 +21,14 @@ from app.store import (
     latest_for_group,
     upsert_device,
     get_all_devices,
+    get_offsets,
+    get_current_offsets,
+    get_calibration_timelines,
+    set_offset,
+    get_config,
+    set_config,
+    mark_sensor_seen,
+    get_known_sensors,
 )
 from app.influx import query_latest, query_history
 from app.mqtt_client import init as mqtt_init, publish
@@ -36,15 +46,73 @@ rollout_lock = threading.Lock()
 app = FastAPI(title="PT100 Fridge OTA Server")
 init_db()
 
+# Calibration offsets: time-ranged (effective-from timestamps).
+# Raw readings are preserved in InfluxDB; calibrated = raw + offset active at reading time.
+_cal_lock = threading.Lock()
+_calibration = get_current_offsets()  # current offset per sensor (for live/latest)
+_cal_version = 0  # bumped on every offset change to invalidate history cache
+
+
+def _get_cal():
+    with _cal_lock:
+        return dict(_calibration), _cal_version
+
+
+def _set_cal(sensor_id, offset):
+    global _cal_version
+    # Effective from now: prior history keeps its previous calibration.
+    set_offset(sensor_id, offset)
+    cur = get_current_offsets()
+    with _cal_lock:
+        _calibration.clear()
+        _calibration.update(cur)
+        _cal_version += 1
+        _history_cache.clear()
+
 
 # ---------------- auth & mqtt ----------------
+_SESSION_TTL = 60 * 60 * 12  # 12 hours
+_SESSION_COOKIE = "ota_session"
+_sessions = {}
+_sessions_lock = threading.Lock()
+
+
+def _session_ok(req: Request) -> bool:
+    sid = req.cookies.get(_SESSION_COOKIE)
+    if not sid:
+        return False
+    now = time.time()
+    with _sessions_lock:
+        exp = _sessions.get(sid)
+        if not exp:
+            return False
+        if exp < now:
+            _sessions.pop(sid, None)
+            return False
+        return True
+
+
 def _authed(req: Request) -> bool:
     if not ADMIN_TOKEN:
         return True
+    # Session cookie (dashboard login)
+    if _session_ok(req):
+        return True
+    # Bearer token (programmatic/API clients)
     a = req.headers.get("Authorization", "")
     if a.startswith("Bearer "):
-        return a[7:] == ADMIN_TOKEN
-    return req.query_params.get("token") == ADMIN_TOKEN
+        token = a[7:]
+        return hmac.compare_digest(token, ADMIN_TOKEN)
+    # Query token fallback for programmatic access
+    qt = req.query_params.get("token")
+    if qt:
+        return hmac.compare_digest(qt, ADMIN_TOKEN)
+    return False
+
+
+def _cookie_secure(req: Request) -> bool:
+    proto = req.headers.get("x-forwarded-proto", req.url.scheme).split(",")[0].strip().lower()
+    return proto == "https"
 
 
 def _on_mqtt(topic: str, payload: bytes):
@@ -157,13 +225,28 @@ FRIDGES_CONFIG = Path(
     )
 )
 
+_default_cfg = {"color_scale": {"min": -50, "max": 20}, "stale_after_s": 15, "rooms": []}
 
-def load_rooms():
-    """Read fridges.json on every call so edits apply without a restart."""
+
+def _load_file_config():
     try:
         return json.loads(FRIDGES_CONFIG.read_text())
     except Exception:
-        return {"color_scale": {"min": -25, "max": 25}, "stale_after_s": 15, "rooms": []}
+        return dict(_default_cfg)
+
+
+def load_rooms():
+    """Return fridge/room config. DB-backed (dynamic, editable from frontend);
+    seeded from fridges.json on first run for backward compatibility."""
+    cfg = get_config("fridges")
+    if cfg and isinstance(cfg, dict) and "rooms" in cfg:
+        return cfg
+    cfg = _load_file_config()
+    try:
+        set_config("fridges", cfg)
+    except Exception:
+        pass
+    return cfg
 
 
 def _room_sensor_ids(cfg):
@@ -175,15 +258,89 @@ def _room_sensor_ids(cfg):
     return ids
 
 
+def _validate_fridges_config(cfg):
+    if not isinstance(cfg, dict):
+        raise HTTPException(400, "config must be an object")
+    rooms = cfg.get("rooms")
+    if not isinstance(rooms, list):
+        raise HTTPException(400, "rooms must be a list")
+    seen_room = set()
+    seen_sensor = set()
+    for i, room in enumerate(rooms):
+        if not isinstance(room, dict):
+            raise HTTPException(400, f"room[{i}] must be an object")
+        rid = str(room.get("id", "")).strip()
+        if not rid:
+            raise HTTPException(400, f"room[{i}] missing id")
+        if rid in seen_room:
+            raise HTTPException(400, f"duplicate room id '{rid}'")
+        seen_room.add(rid)
+        sensors = room.get("sensors", [])
+        if sensors is None:
+            room["sensors"] = sensors = []
+        if not isinstance(sensors, list):
+            raise HTTPException(400, f"room '{rid}' sensors must be a list")
+        for j, s in enumerate(sensors):
+            if not isinstance(s, dict):
+                raise HTTPException(400, f"room '{rid}' sensor[{j}] must be an object")
+            sid = str(s.get("id", "")).strip()
+            if not sid:
+                raise HTTPException(400, f"room '{rid}' sensor[{j}] missing id")
+            if sid in seen_sensor:
+                raise HTTPException(400, f"sensor '{sid}' assigned to more than one room")
+            seen_sensor.add(sid)
+    if "color_scale" not in cfg or not isinstance(cfg.get("color_scale"), dict):
+        cfg["color_scale"] = dict(_default_cfg["color_scale"])
+    if "stale_after_s" not in cfg:
+        cfg["stale_after_s"] = _default_cfg["stale_after_s"]
+    return cfg
+
+
 @app.get("/api/fridges")
 def fridges():
     return load_rooms()
 
 
+@app.put("/api/fridges")
+async def fridges_save(req: Request):
+    if not _authed(req):
+        raise HTTPException(401, "unauthorized")
+    try:
+        body = await req.json()
+    except Exception:
+        raise HTTPException(400, "invalid JSON")
+    cfg = _validate_fridges_config(body)
+    set_config("fridges", cfg)
+    # Ensure assigned sensors are tracked as known
+    for sid in _room_sensor_ids(cfg):
+        try:
+            mark_sensor_seen(sid)
+        except Exception:
+            pass
+    with _history_lock:
+        _history_cache.clear()
+    return cfg
+
+
+@app.get("/api/sensors/known")
+def sensors_known():
+    """Known sensor IDs (seen via MQTT telemetry) merged with assigned sensors."""
+    cfg = load_rooms()
+    seen = {r["sensor_id"] for r in get_known_sensors()}
+    for sid in _room_sensor_ids(cfg):
+        seen.add(sid)
+    # Also include any sensors with calibration offsets
+    for sid in get_offsets().keys():
+        seen.add(sid)
+    return {"sensors": sorted(seen)}
+
+
 @app.get("/api/readings/latest")
 def readings_latest():
     cfg = load_rooms()
-    return {"readings": query_latest(_room_sensor_ids(cfg))}
+    sids = _room_sensor_ids(cfg)
+    timelines = get_calibration_timelines(sids)
+    return {"readings": query_latest(sids, calibration=timelines)}
 
 
 # In-memory (memcached-style) cache for history queries so range toggles and
@@ -204,17 +361,93 @@ def _history_cache_put(key, val):
         _history_cache[key] = (val, time.time())
 
 @app.get("/api/readings/history")
-def readings_history(sensors: str = "", minutes: int = 60, points: int = 90):
-    ids = [s.strip() for s in sensors.split(",") if s.strip()]
+def readings_history(sensors: str = "", ids: str = "", minutes: int = 60, points: int = 90):
+    raw = sensors or ids
+    ids = [s.strip() for s in raw.split(",") if s.strip()]
     if not ids:
         ids = _room_sensor_ids(load_rooms())
-    key = (tuple(sorted(ids)), minutes, points)
+    _, cal_ver = _get_cal()
+    key = (tuple(sorted(ids)), minutes, points, cal_ver)
     cached = _history_cache_get(key)
     if cached is not None:
         return {"series": cached, "cached": True}
-    series = query_history(ids, minutes, points)
+    timelines = get_calibration_timelines(ids)
+    series = query_history(ids, minutes, points, calibration=timelines)
     _history_cache_put(key, series)
     return {"series": series}
+
+
+@app.get("/api/client-config")
+def client_config():
+    """Non-secret config for the dashboard frontend."""
+    return {"auth_required": bool(ADMIN_TOKEN)}
+
+
+@app.post("/api/auth/login")
+async def auth_login(req: Request, response: Response):
+    if not ADMIN_TOKEN:
+        return {"ok": True, "auth_required": False}
+    try:
+        body = await req.json()
+    except Exception:
+        body = {}
+    token = str(body.get("token", ""))
+    if not token or not hmac.compare_digest(token, ADMIN_TOKEN):
+        raise HTTPException(401, "invalid token")
+    sid = secrets.token_urlsafe(32)
+    with _sessions_lock:
+        _sessions[sid] = time.time() + _SESSION_TTL
+    response.set_cookie(
+        _SESSION_COOKIE,
+        sid,
+        httponly=True,
+        samesite="lax",
+        secure=_cookie_secure(req),
+        path="/",
+        max_age=_SESSION_TTL,
+    )
+    return {"ok": True}
+
+
+@app.post("/api/auth/logout")
+async def auth_logout(req: Request, response: Response):
+    sid = req.cookies.get(_SESSION_COOKIE)
+    if sid:
+        with _sessions_lock:
+            _sessions.pop(sid, None)
+    response.delete_cookie(_SESSION_COOKIE, path="/", samesite="lax", secure=_cookie_secure(req))
+    return {"ok": True}
+
+
+@app.get("/api/auth/status")
+def auth_status(req: Request):
+    return {"authenticated": _authed(req), "auth_required": bool(ADMIN_TOKEN)}
+
+
+@app.get("/api/calibration")
+def calibration_get():
+    cal, _ = _get_cal()
+    return {"offsets": cal}
+
+
+@app.post("/api/calibration")
+async def calibration_set(req: Request, payload: dict):
+    if not _authed(req):
+        raise HTTPException(401, "unauthorized")
+    sensor_id = str(payload.get("sensor_id", "")).strip()
+    if not sensor_id:
+        raise HTTPException(400, "sensor_id required")
+    try:
+        offset = float(payload.get("offset", 0.0))
+    except Exception:
+        raise HTTPException(400, "offset must be a number")
+    if offset < -25.0 or offset > 25.0:
+        raise HTTPException(400, "offset must be between -25 and +25")
+    # Normalize tiny floats to 0
+    if abs(offset) < 1e-9:
+        offset = 0.0
+    _set_cal(sensor_id, offset)
+    return {"sensor_id": sensor_id, "offset": offset}
 
 
 # ---------------- live stream (SSE) ----------------
@@ -227,17 +460,40 @@ def _q_put(q, item):
         q.put_nowait(item)
 
 
+_seen_sensors = set()
+_seen_lock = threading.Lock()
+
+
 def _on_pt100(topic: str, payload: bytes):
     sid = topic.split("/")[-1]
+    if sid:
+        with _seen_lock:
+            first = sid not in _seen_sensors
+            if first:
+                _seen_sensors.add(sid)
+        if first:
+            try:
+                mark_sensor_seen(sid)
+            except Exception:
+                pass
     try:
         data = json.loads(payload)
     except Exception:
         return
+    raw = data.get("temp")
+    cal, _ = _get_cal()
+    off = float(cal.get(sid, 0.0))
+    try:
+        temp = round(float(raw) + off, 2) if raw is not None else None
+    except Exception:
+        temp = raw
     evt = {
         "sensor_id": sid,
-        "temp": data.get("temp"),
+        "temp": temp,
+        "raw_temp": raw,
         "resistance": data.get("resistance"),
         "fault": data.get("fault"),
+        "offset": off,
         "time": int(time.time() * 1000),
     }
     if _sse_loop is None:
