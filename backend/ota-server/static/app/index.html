@@ -3,8 +3,12 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Veze Sharri - Cold Chain</title>
+  <title>Veze Sharri | Cold Chain Monitoring</title>
   <meta name="color-scheme" content="dark">
+  <meta name="description" content="Cold chain monitoring dashboard for refrigerated rooms and sensors.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="vendor/uPlot.min.css">
   <link rel="stylesheet" href="app.css">
 </head>
@@ -14,40 +18,71 @@
       <span class="brand-mark" aria-hidden="true">VS</span>
       <div class="brand-text">
         <h1>Veze Sharri</h1>
-        <p>Cold chain monitoring</p>
+        <p>Cold Chain Monitoring</p>
       </div>
     </div>
-    <div class="conn" id="conn">
-      <span class="conn-dot" id="conn-dot"></span>
-      <span id="conn-label">Connecting</span>
+    <div class="topbar-actions">
+      <div class="conn" id="conn" aria-live="polite">
+        <span class="conn-dot" id="conn-dot"></span>
+        <span id="conn-label">Connecting</span>
+      </div>
     </div>
   </header>
 
   <section class="kpibar" id="kpis" aria-label="Fleet summary"></section>
 
-  <div class="layout">
-    <main id="view" aria-live="polite"></main>
+  <div class="app-shell">
     <aside class="sidebar" aria-label="Rooms">
-      <h3>Cold rooms</h3>
-      <nav id="room-list"></nav>
-    </aside>
-  </div>
-
-  <section class="fleet" id="fleet" aria-label="Fleet status"></section>
-
-  <section class="history" id="history">
-    <div class="history-head">
-      <h3>Temperature history</h3>
-      <div class="seg" id="range-seg" role="tablist" aria-label="Time range">
-        <button class="seg-btn" data-min="30" role="tab">30m</button>
-        <button class="seg-btn active" data-min="60" role="tab">1h</button>
-        <button class="seg-btn" data-min="360" role="tab">6h</button>
-        <button class="seg-btn" data-min="1440" role="tab">24h</button>
+      <div class="sidebar-head">
+        <h3>Rooms</h3>
+        <button id="manage-btn" class="btn btn-ghost" type="button">Manage</button>
       </div>
-    </div>
-    <p class="history-hint">Drag across a chart to zoom the time axis. Double-click to reset.</p>
-    <div class="history-grid" id="hist-grid"></div>
-  </section>
+      <div class="sidebar-search">
+        <input id="room-search" type="search" placeholder="Search rooms…" aria-label="Search rooms">
+      </div>
+      <nav id="room-list" class="room-list"></nav>
+    </aside>
+
+    <main class="main" id="main">
+      <section id="view" class="view" aria-live="polite"></section>
+
+      <section class="panel fleet-panel" id="fleet-panel" aria-label="Fleet overview">
+        <div class="panel-head">
+          <div>
+            <h2>Fleet overview</h2>
+            <p class="panel-sub">Status across all cold rooms</p>
+          </div>
+          <div class="fleet-tools">
+            <input id="fleet-search" type="search" placeholder="Search rooms…" aria-label="Search fleet">
+            <div class="filter-chips" id="fleet-filters" role="group" aria-label="Filter by status">
+              <button class="chip active" data-filter="all">All</button>
+              <button class="chip" data-filter="alarm">Alarm</button>
+              <button class="chip" data-filter="warn">Warning</button>
+              <button class="chip" data-filter="ok">OK</button>
+              <button class="chip" data-filter="offline">Offline</button>
+            </div>
+          </div>
+        </div>
+        <div class="fleet" id="fleet"></div>
+      </section>
+
+      <section class="panel history" id="history" aria-label="Temperature history">
+        <div class="panel-head history-head">
+          <div>
+            <h2>Temperature history</h2>
+            <p class="panel-sub history-hint">Drag to zoom the time axis. Double-click to reset.</p>
+          </div>
+          <div class="seg" id="range-seg" role="tablist" aria-label="Time range">
+            <button class="seg-btn" data-min="30" role="tab">30m</button>
+            <button class="seg-btn active" data-min="60" role="tab">1h</button>
+            <button class="seg-btn" data-min="360" role="tab">6h</button>
+            <button class="seg-btn" data-min="1440" role="tab">24h</button>
+          </div>
+        </div>
+        <div class="history-grid" id="hist-grid"></div>
+      </section>
+    </main>
+  </div>
 
   <script src="vendor/uPlot.iife.min.js"></script>
   <script type="module" src="app.js"></script>
