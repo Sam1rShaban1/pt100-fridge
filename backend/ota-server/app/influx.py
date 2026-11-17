@@ -23,11 +23,15 @@ def _ms(t):
     if t is None:
         return None
     if isinstance(t, (int, float)):
-        if t > 1e14:  # nanoseconds
-            return int(t / 1e6)
-        if t > 1e11:  # microseconds
-            return int(t / 1e3)
-        return int(t * 1000) if t < 1e11 else int(t)  # seconds / already ms
+        v = int(t)
+        av = abs(v)
+        if av >= 10**17:      # nanoseconds
+            return v // 1_000_000
+        if av >= 10**14:      # microseconds
+            return v // 1_000
+        if av >= 10**11:      # already milliseconds (current epoch ~1.7e12)
+            return v
+        return v * 1000       # seconds
     try:
         dt = datetime.fromisoformat(str(t).replace("Z", "+00:00"))
         return int(dt.timestamp() * 1000)
@@ -81,7 +85,10 @@ def _normalize_cal(cal, sensor_ids):
         if v is None:
             out[sid] = ([], [])
         elif isinstance(v, list):
-            out[sid] = ([int(t) for t, _ in v], [float(o) for _, o in v])
+            # Sort defensively: a caller-supplied timeline must be ascending
+            # for bisect to select the right offset.
+            pairs = sorted((int(t), float(o)) for t, o in v)
+            out[sid] = ([t for t, _ in pairs], [o for _, o in pairs])
         else:
             # flat current offset -> effective from -inf
             out[sid] = ([ -10**18 ], [float(v)])

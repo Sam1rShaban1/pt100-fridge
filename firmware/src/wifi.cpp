@@ -1,5 +1,7 @@
 #include "wifi.h"
 #include "config.h"
+#include "platform.h"
+
 #include <WiFi.h>
 
 static unsigned long s_lastAttempt = 0;
@@ -12,26 +14,31 @@ static bool s_initialized = false;
 static bool s_reconnectPending = false;
 static unsigned long s_reconnectAt = 0;
 static int s_lastRssi = 0;
+static bool s_autoReboot = true;
 
 // After 10 minutes without WiFi, reboot to clear any wedged driver/DHCP state.
 static const unsigned long REBOOT_AFTER_MS = 10UL * 60UL * 1000UL; // 10 min
 // Cap retry interval at 60s
 static const unsigned long RETRY_MAX_MS = 60000UL;
 
+void wifiSetAutoReboot(bool enable) {
+  s_autoReboot = enable;
+}
+
 void wifiInit() {
   if (s_initialized) return;
   s_initialized = true;
 
   WiFi.mode(WIFI_STA);
-  WiFi.setSleep(false);          // no modem sleep — critical for reliability
-  WiFi.setAutoReconnect(false);  // manual exponential backoff, avoid double attempts
-  WiFi.persistent(false);        // don't wear NVS on every boot
+  // CYW43 low-power mode adds latency and drops; keep the radio awake.
+  WiFi.noLowPowerMode();
+  WiFi.persistent(false);        // compatibility no-op, kept for clarity
   WiFi.setHostname(DEVICE_ID);
-  // Optional: increase TX power for noisy industrial freezers
-  // WiFi.setTxPower(WIFI_POWER_19_5dBm);
 
   Serial.printf("WiFi: connecting to \"%s\"\n", WIFI_SSID);
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  // Non-blocking: WiFi.begin() on the Pico core waits up to 15 s, which would
+  // stall sensor publishing and OTA every reconnect.
+  WiFi.beginNoBlock(WIFI_SSID, WIFI_PASSWORD);
   s_lastAttempt = millis();
   s_disconnectedSince = millis();
   s_retryDelay = 1000;
@@ -43,7 +50,7 @@ bool wifiIsConnected() {
 }
 
 int wifiRSSI() {
-  return WiFi.RSSI();
+  return (int)WiFi.RSSI();
 }
 
 unsigned long wifiConnectedSince() {
@@ -66,10 +73,9 @@ bool wifiLoop() {
       s_retryDelay = 1000;
       Serial.printf("WiFi connected IP=%s GW=%s RSSI=%d dBm\n",
                     WiFi.localIP().toString().c_str(),
-                    WiFi.gatewayIP().toString().c_str(),
-                    WiFi.RSSI());
+                    WiFi.gatewayIP().toString().c_str(), (int)WiFi.RSSI());
     } else {
-      s_lastRssi = WiFi.RSSI();
+      s_lastRssi = (int)WiFi.RSSI();
     }
     return true;
   }
@@ -92,16 +98,18 @@ bool wifiLoop() {
     if (now < s_reconnectAt) return false;
     s_reconnectPending = false;
     Serial.printf("WiFi: re-issuing begin(\"%s\")\n", WIFI_SSID);
-    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+    WiFi.beginNoBlock(WIFI_SSID, WIFI_PASSWORD);
     s_lastAttempt = now;
     return false;
   }
 
-  // Watchdog: only reboot if WiFi had ever been up (avoid boot-loop on bad creds)
-  if (s_connectedSince != 0 && now - s_disconnectedSince > REBOOT_AFTER_MS) {
+  // Watchdog: only reboot if WiFi had ever been up (avoid boot-loop on bad
+  // credentials) and only when the boot guard has not disabled reboots.
+  if (s_autoReboot && s_connectedSince != 0 &&
+      now - s_disconnectedSince > REBOOT_AFTER_MS) {
     Serial.println("WiFi down 10min — rebooting to recover");
     delay(500);
-    ESP.restart();
+    ptRestart();
   }
 
   if (now - s_lastAttempt < s_retryDelay) {
@@ -115,7 +123,7 @@ bool wifiLoop() {
                 s_attempt, s_retryDelay / 1000, (int)WiFi.status());
 
   // Clean disconnect then schedule begin() 200ms later (non-blocking)
-  WiFi.disconnect(false, true);
+  WiFi.disconnect(false);
   s_reconnectPending = true;
   s_reconnectAt = now + 200;
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Regenerate the MQTT CA + server certificate.
 # After running this you MUST copy the new ca.crt contents into
-# firmware/src/certs.h (MQTT_ROOT_CA) so the ESP32 still trusts the broker.
+# firmware/src/certs.h (MQTT_ROOT_CA) so the Pico W still trusts the broker.
 set -e
 cd "$(dirname "$0")/certs"
 

@@ -1,15 +1,16 @@
 import os
 import json
+import math
+import re
 import time
 import asyncio
-import hashlib
 import hmac
 import secrets
 import threading
 from pathlib import Path
 
 from fastapi import FastAPI, UploadFile, File, Form, Request, HTTPException, Response
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, StreamingResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 
 import uvicorn
@@ -18,6 +19,7 @@ from app.store import (
     init_db,
     add_firmware,
     get_firmware,
+    list_firmware,
     latest_for_group,
     upsert_device,
     get_all_devices,
@@ -31,6 +33,13 @@ from app.store import (
     get_known_sensors,
 )
 from app.influx import query_latest, query_history
+from app.firmware_image import (
+    DEFAULT_HW,
+    HW_TARGETS,
+    MAX_IMAGE_BYTES,
+    sha256_hex,
+    validate_image,
+)
 from app.mqtt_client import init as mqtt_init, publish
 
 FIRMWARE_DIR = Path(os.environ.get("FIRMWARE_DIR", "/data/firmware"))
@@ -45,6 +54,9 @@ rollout_lock = threading.Lock()
 
 app = FastAPI(title="PT100 Fridge OTA Server")
 init_db()
+if not ADMIN_TOKEN:
+    print("WARNING: OTA_ADMIN_TOKEN is empty; firmware upload/rollout are disabled "
+          "(set OTA_ADMIN_TOKEN in backend/.env)")
 
 # Calibration offsets: time-ranged (effective-from timestamps).
 # Raw readings are preserved in InfluxDB; calibrated = raw + offset active at reading time.
@@ -94,7 +106,11 @@ def _session_ok(req: Request) -> bool:
 
 def _authed(req: Request) -> bool:
     if not ADMIN_TOKEN:
-        return True
+        # Fail closed: an unset token must never mean "no auth", otherwise a
+        # forgotten .env line silently exposes firmware upload/rollout to
+        # anyone who can reach the port. The startup warning explains why
+        # these endpoints return 401/503.
+        return False
     # Session cookie (dashboard login)
     if _session_ok(req):
         return True
@@ -126,10 +142,17 @@ def _on_mqtt(topic: str, payload: bytes):
         data = {}
     grp = data.get("group")
     ver = data.get("version")
+    hw = data.get("hw")
+    # Normalise so a typo cannot create a new hardware bucket, but keep None
+    # for status messages (which do not carry hw) so the stored value survives.
+    if hw is not None:
+        hw = str(hw).strip().lower()[:24] or None
+        if hw not in HW_TARGETS:
+            hw = None
     if kind == "hello":
-        upsert_device(device_id, grp, ver, "online")
+        upsert_device(device_id, grp, ver, "online", hw)
     elif kind == "status":
-        upsert_device(device_id, grp, ver, data.get("state"))
+        upsert_device(device_id, grp, ver, data.get("state"), hw)
         _handle_status(device_id, data.get("state"))
 
 
@@ -149,6 +172,54 @@ def _handle_status(device_id, state):
                     st["phase"] = "aborted"
 
 
+def _public_base() -> str:
+    """Base URL for links handed to devices outside a request (MQTT commands)."""
+    return PUBLIC_BASE
+
+
+def _public_base_configured() -> bool:
+    return bool(PUBLIC_BASE) and "example.com" not in PUBLIC_BASE
+
+
+def _request_base(req: Request) -> str:
+    """Base URL built from the address the device actually used.
+
+    Devices on a LAN reach the server at 192.168.x.x while PUBLIC_BASE_URL may
+    be a public domain (or a stale placeholder). Using the incoming host means
+    the download URL is always reachable from that device.
+    """
+    proto = req.headers.get("x-forwarded-proto", req.url.scheme).split(",")[0].strip().lower()
+    host = (
+        req.headers.get("x-forwarded-host")
+        or req.headers.get("host")
+        or req.url.netloc
+    )
+    host = (host or "").split(",")[0].strip()
+    if not host:
+        return _public_base()
+    return f"{proto}://{host}".rstrip("/")
+
+
+def _fw_payload(fw):
+    payload = {
+        "version": fw["version"],
+        "hw": fw.get("hw", DEFAULT_HW),
+    }
+    if _public_base_configured():
+        payload.update(
+            {
+                "url": f"{_public_base()}/firmware/{fw['filename']}",
+                "sha256": fw["sha256"],
+                "size": fw["size"],
+            }
+        )
+    else:
+        # No usable public base URL: tell the device to pull the manifest
+        # instead of handing it a URL it cannot reach.
+        payload["action"] = "check"
+    return json.dumps(payload)
+
+
 def _promote(grp, st):
     if st["phase"] != "canary" or st["pending"]:
         return
@@ -156,18 +227,11 @@ def _promote(grp, st):
         st["phase"] = "aborted"
         return
     st["phase"] = "full"
-    fw = get_firmware(st["version"])
+    fw = get_firmware(st["version"], st.get("hw"))
     if not fw:
         st["phase"] = "aborted"
         return
-    payload = json.dumps(
-        {
-            "version": fw["version"],
-            "url": f"{PUBLIC_BASE}/firmware/{fw['filename']}",
-            "sha256": fw["sha256"],
-            "size": fw["size"],
-        }
-    )
+    payload = _fw_payload(fw)
     for d in st["rest"]:
         publish(f"ota/{d}/update", payload)
 
@@ -179,27 +243,36 @@ def _watchdog(grp):
             st["phase"] = "aborted"  # canary timed out; do not promote
 
 
-def start_rollout(version, group, canary):
-    fw = get_firmware(version)
+def start_rollout(version, group, canary, hw=None):
+    fw = get_firmware(version, hw)
     if not fw:
-        raise HTTPException(404, "version not found")
-    devices = DEVICE_GROUPS.get(group, [])
+        raise HTTPException(404, "version not found" + (f" for hw '{hw}'" if hw else ""))
+    hw = fw.get("hw") or DEFAULT_HW
+    devices = list(DEVICE_GROUPS.get(group, []))
     if not devices:
         raise HTTPException(400, f"unknown group '{group}' or no devices configured")
+
+    # Never push a build to a device whose board is not positively known to
+    # match. Legacy firmware does not report hw and would happily flash a
+    # Pico image, so unknown devices are skipped rather than trusted.
+    seen_hw = {d["device_id"]: d.get("hw") for d in get_all_devices()}
+    skipped = [d for d in devices if seen_hw.get(d) != hw]
+    devices = [d for d in devices if seen_hw.get(d) == hw]
+    if not devices:
+        raise HTTPException(
+            400,
+            f"no devices in group '{group}' report hardware '{hw}'. "
+            "Devices must boot once with this firmware before they can be targeted.",
+        )
+
     canary = max(1, min(int(canary), len(devices)))
     canary_ids = devices[:canary]
     rest_ids = devices[canary:]
-    payload = json.dumps(
-        {
-            "version": fw["version"],
-            "url": f"{PUBLIC_BASE}/firmware/{fw['filename']}",
-            "sha256": fw["sha256"],
-            "size": fw["size"],
-        }
-    )
+    payload = _fw_payload(fw)
     with rollout_lock:
         rollout_state[group] = {
             "version": version,
+            "hw": hw,
             "phase": "canary",
             "pending": set(canary_ids),
             "success": set(),
@@ -211,9 +284,12 @@ def start_rollout(version, group, canary):
     threading.Timer(300, _watchdog, args=(group,)).start()
     return {
         "group": group,
+        "version": version,
+        "hw": hw,
         "phase": "canary",
         "targets": canary_ids,
         "remaining": len(rest_ids),
+        "skipped_hw_mismatch": skipped,
     }
 
 
@@ -303,8 +379,6 @@ def fridges():
 
 @app.put("/api/fridges")
 async def fridges_save(req: Request):
-    if not _authed(req):
-        raise HTTPException(401, "unauthorized")
     try:
         body = await req.json()
     except Exception:
@@ -386,7 +460,9 @@ def client_config():
 @app.post("/api/auth/login")
 async def auth_login(req: Request, response: Response):
     if not ADMIN_TOKEN:
-        return {"ok": True, "auth_required": False}
+        # Do not pretend auth is disabled: uploads/rollouts are blocked, so
+        # say so instead of handing back a useless session.
+        raise HTTPException(503, "OTA_ADMIN_TOKEN is not configured on the server")
     try:
         body = await req.json()
     except Exception:
@@ -432,8 +508,6 @@ def calibration_get():
 
 @app.post("/api/calibration")
 async def calibration_set(req: Request, payload: dict):
-    if not _authed(req):
-        raise HTTPException(401, "unauthorized")
     sensor_id = str(payload.get("sensor_id", "")).strip()
     if not sensor_id:
         raise HTTPException(400, "sensor_id required")
@@ -464,6 +538,25 @@ _seen_sensors = set()
 _seen_lock = threading.Lock()
 
 
+def _num_or_none(v):
+    if v is None:
+        return None
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        return None
+    return x if math.isfinite(x) else None
+
+
+def _int_or_none(v):
+    if v is None:
+        return None
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
 def _on_pt100(topic: str, payload: bytes):
     sid = topic.split("/")[-1]
     if sid:
@@ -480,19 +573,29 @@ def _on_pt100(topic: str, payload: bytes):
         data = json.loads(payload)
     except Exception:
         return
+    # Telemetry comes over MQTT, which is reachable by any client with broker
+    # credentials. Accept only what the dashboard can render: a finite number
+    # (or nothing). A malformed/forged payload must not poison the live view.
     raw = data.get("temp")
+    if raw is not None:
+        try:
+            raw = float(raw)
+        except (TypeError, ValueError):
+            raw = None
+        if raw is not None and not math.isfinite(raw):
+            raw = None
     cal, _ = _get_cal()
-    off = float(cal.get(sid, 0.0))
     try:
-        temp = round(float(raw) + off, 2) if raw is not None else None
-    except Exception:
-        temp = raw
+        off = float(cal.get(sid, 0.0))
+    except (TypeError, ValueError):
+        off = 0.0
+    temp = round(raw + off, 2) if raw is not None else None
     evt = {
         "sensor_id": sid,
         "temp": temp,
         "raw_temp": raw,
-        "resistance": data.get("resistance"),
-        "fault": data.get("fault"),
+        "resistance": _num_or_none(data.get("resistance")),
+        "fault": _int_or_none(data.get("fault")),
         "offset": off,
         "time": int(time.time() * 1000),
     }
@@ -549,28 +652,80 @@ async def upload_firmware(
     file: UploadFile = File(...),
     group: str = Form("all"),
     version: str = Form(""),
+    hw: str = Form(DEFAULT_HW),
 ):
     if not _authed(req):
         raise HTTPException(401, "unauthorized")
-    fname = version or (file.filename or "firmware.bin")
-    if not fname.endswith(".bin"):
-        fname += ".bin"
-    ver = version or fname[:-4]
-    data = await file.read()
-    sha = hashlib.sha256(data).hexdigest()
-    (FIRMWARE_DIR / fname).write_bytes(data)
-    add_firmware(ver, group, sha, len(data), fname)
-    return {"version": ver, "group": group, "sha256": sha, "size": len(data), "filename": fname}
+    hw = (hw or DEFAULT_HW).strip().lower()
+    if hw not in HW_TARGETS:
+        raise HTTPException(400, f"hw must be one of: {', '.join(HW_TARGETS)}")
+
+    # Cap the read: never buffer an arbitrarily large upload just to reject it
+    # afterwards.
+    limit = MAX_IMAGE_BYTES + 1
+    data = await file.read(limit)
+    if len(data) >= limit:
+        raise HTTPException(413, f"firmware file is too large (limit {MAX_IMAGE_BYTES})")
+    err = validate_image(data, hw)
+    if err:
+        raise HTTPException(400, err)
+
+    ver = (version or "").strip()
+    if not ver:
+        m = re.search(r"(\d+\.\d+\.\d+)", Path(file.filename or "").stem)
+        ver = m.group(1) if m else ""
+    if not re.fullmatch(r"\d+\.\d+\.\d+", ver):
+        raise HTTPException(400, "version must look like 1.2.3")
+
+    # One file per (version, board): two boards sharing a version must not
+    # overwrite each other's image on disk.
+    fname = f"{ver}-{hw}.bin"
+    sha = sha256_hex(data)
+    dest = FIRMWARE_DIR / fname
+    # Write-then-rename: a crash, redeploy or full disk mid-write must never
+    # leave a truncated file behind. os.replace is atomic, so a device either
+    # sees the previous complete image or this complete one, never a partial
+    # download that fails its SHA-256 check in the field.
+    tmp = dest.with_name(f".{fname}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
+    try:
+        with open(tmp, "wb") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, dest)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+    add_firmware(ver, group, sha, len(data), fname, hw=hw)
+    return {
+        "version": ver,
+        "hw": hw,
+        "group": group,
+        "sha256": sha,
+        "size": len(data),
+        "filename": fname,
+    }
+
+
+@app.get("/api/firmware")
+def firmware_list():
+    return {"firmware": list_firmware()}
 
 
 @app.get("/api/firmware/manifest")
-def manifest(device_id: str, group: str, current: str = ""):
-    best = latest_for_group(group, current)
+def manifest(req: Request, device_id: str, group: str, current: str = "", hw: str = ""):
+    hw = (hw or "").strip().lower()
+    if hw not in HW_TARGETS:
+        # No/unknown board: serve nothing. Guessing here is how a device ends
+        # up flashing another architecture and never booting again.
+        return Response(status_code=204)
+    best = latest_for_group(group, current, hw)
     if not best:
         return Response(status_code=204)
     return {
         "version": best["version"],
-        "url": f"{PUBLIC_BASE}/firmware/{best['filename']}",
+        "hw": best.get("hw", hw),
+        "url": f"{_request_base(req)}/firmware/{best['filename']}",
         "sha256": best["sha256"],
         "size": best["size"],
     }
@@ -580,7 +735,9 @@ def manifest(device_id: str, group: str, current: str = ""):
 async def rollout(req: Request, payload: dict):
     if not _authed(req):
         raise HTTPException(401, "unauthorized")
-    return start_rollout(payload["version"], payload["group"], payload.get("canary", 1))
+    return start_rollout(
+        payload["version"], payload["group"], payload.get("canary", 1), payload.get("hw")
+    )
 
 
 @app.get("/api/rollout")
@@ -590,6 +747,7 @@ def rollout_status():
             g: {
                 "phase": s["phase"],
                 "version": s["version"],
+                "hw": s.get("hw"),
                 "pending": list(s["pending"]),
                 "success": list(s["success"]),
                 "failed": list(s["failed"]),
@@ -602,6 +760,17 @@ def rollout_status():
 @app.get("/api/devices")
 def devices():
     return get_all_devices()
+
+
+_STATIC_DIR = Path(__file__).parent.parent / "static"
+
+@app.get("/logo.png")
+def logo_png():
+    return FileResponse(_STATIC_DIR / "logo.png")
+
+@app.get("/favicon.ico")
+def favicon_ico():
+    return FileResponse(_STATIC_DIR / "favicon.ico")
 
 
 app.mount(

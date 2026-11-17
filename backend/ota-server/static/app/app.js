@@ -188,7 +188,14 @@ function buildSidebar() {
   const wrap = $("#room-list");
   if (!wrap) return;
   wrap.innerHTML = "";
-  state.openRooms = new Set(state.fridges.map(f => f.id));
+  // Preserve collapse/expand state across rebuilds; default to open for new rooms
+  const prev = state.openRooms || new Set();
+  const nextOpen = new Set();
+  state.fridges.forEach(f => { if (prev.has(f.id) || !state._sidebarInit) nextOpen.add(f.id); });
+  // Keep explicitly tracked rooms (including those filtered out of view) stable
+  prev.forEach(id => { if (state.fridges.some(f => f.id === id)) nextOpen.add(id); });
+  state.openRooms = nextOpen;
+  state._sidebarInit = true;
   const q = (state.roomQuery || "").trim().toLowerCase();
   const rooms = state.fridges.filter(r => !q || (r.name||"").toLowerCase().includes(q) || (r.id||"").toLowerCase().includes(q));
   if (!rooms.length) {

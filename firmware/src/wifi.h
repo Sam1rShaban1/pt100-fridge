@@ -10,3 +10,7 @@ bool wifiIsConnected();
 int  wifiRSSI();
 unsigned long wifiConnectedSince(); // millis() when last connected, 0 if never
 unsigned long wifiDisconnectedMs(); // ms since disconnect, 0 if connected
+
+// Disable automatic reboots (used in boot-guard safe mode so a bad image can
+// still be recovered over OTA instead of looping forever).
+void wifiSetAutoReboot(bool enable);

@@ -1,13 +1,8 @@
 #include "mqtt.h"
 #include "config.h"
-#include "certs.h"
 #include "wifi.h"
 
-#ifdef LOCAL_DEV
 WiFiClient mqttNet;
-#else
-WiFiClientSecure mqttNet;
-#endif
 PubSubClient mqtt(mqttNet);
 
 // Implemented in main.cpp
@@ -18,10 +13,7 @@ static void mqttCallback(char* topic, byte* payload, unsigned int len) {
 }
 
 void mqttInit() {
-#ifndef LOCAL_DEV
-  mqttNet.setCACert(MQTT_ROOT_CA);
-#endif
-  mqttNet.setTimeout(15000);
+  mqttNet.setTimeout(5000);
   mqtt.setServer(MQTT_BROKER, MQTT_PORT);
   mqtt.setCallback(mqttCallback);
   mqtt.setBufferSize(1024);
@@ -59,9 +51,15 @@ void mqttLoop() {
   }
 }
 
+void mqttService() {
+  if (mqtt.connected()) mqtt.loop();
+}
+
 bool mqttPublish(const char* topic, const char* payload, bool retain) {
   if (!wifiIsConnected()) return false;
-  if (!mqtt.connected() && !mqttConnect()) return false;
+  // Do NOT connect here. mqttLoop() owns reconnects with a backoff; a blocking
+  // connect attempt from the 1 Hz publish path (or from an OTA status report)
+  // would stall the loop, sensor publishing and the OTA download.
   if (!mqtt.connected()) return false;
   bool ok = mqtt.publish(topic, (const char*)payload, retain);
   if (!ok) {
@@ -73,4 +71,8 @@ bool mqttPublish(const char* topic, const char* payload, bool retain) {
 
 void mqttSubscribe(const char* topic) {
   mqtt.subscribe(topic);
+}
+
+bool mqttIsConnected() {
+  return mqtt.connected();
 }

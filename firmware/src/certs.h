@@ -1,10 +1,5 @@
 #pragma once
-// Two root CAs are embedded:
-//  - ISRG_X1_ROOT : Let's Encrypt ISRG X1, used to verify the HTTPS connection
-//    (served by Caddy / Let's Encrypt) when the ESP32 downloads firmware over OTA.
-//  - MQTT_ROOT_CA : the private CA generated for this project (backend/mosquitto/certs/ca.crt).
-//    Used to verify the MQTTS (TLS) connection to the broker. If you regenerate the CA,
-//    paste the new ca.crt contents here.
+// Let's Encrypt ISRG X1 verifies HTTPS OTA downloads.
 
 // ----- Let's Encrypt ISRG X1 (for HTTPS OTA downloads) -----
 static const char ISRG_X1_ROOT[] =
@@ -38,28 +33,5 @@ oyi3B43njTOQ5yOf+1CceWxG1bQVs5ZufpsMljq4Ui0/1lvh+wjChP4kqKOJ2qxq
 4RgqsahDYVvTH9w7jXbyLeiNdd8XM2w9U/t7y0Ff/9yi0GE44Za4rF2LN9d11TPA
 mRGunUHBcnWEvgJBQl9nJEiU0Zsnvgc/ubhPgXRR4Xq37Z0j4r7g1SgEEzwxA57d
 emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
------END CERTIFICATE-----
-)CRT";
-
-// ----- Project MQTT CA (backend/mosquitto/certs/ca.crt) -----
-static const char MQTT_ROOT_CA[] =
-R"CRT(-----BEGIN CERTIFICATE-----
-MIIDDzCCAfegAwIBAgIULDjyyLmyEKsW8ZI88Mysy85Wf1QwDQYJKoZIhvcNAQEL
-BQAwFzEVMBMGA1UEAwwMcHQxMDAtb3RhLWNhMB4XDTI2MDgyNDEwMTEyNloXDTM2
-MDgyMTEwMTEyNlowFzEVMBMGA1UEAwwMcHQxMDAtb3RhLWNhMIIBIjANBgkqhkiG
-9w0BAQEFAAOCAQ8AMIIBCgKCAQEApku769h6uoQ/4YJ4gPmBagnfq3FeMnassNlm
-gTSvVI7InkEAzrKEWkFkBW0j49KTWlapwsHTgjz5Xop+c6A48q6ndy5SHuJZjPVj
-TRsD5FtH03A/nmK0wsYj4lLBMlOU+RLCwWeMcluFsVST/8qoOBLs3jeTBblLhvMX
-zgYoNB8MDQ4spIZeoFBaFKtVjAWK/rVbDEkm5PwSYCI929epO3Pq+PQhpgZw/p5k
-jGFqf55wXdRNX3oVBPUjRhwRitsFFQSqZUiM4ZFRd6+Ktl30KKs+IxR6Xb6WK2Tm
-wiKX+h21+MGvTc8MlbZ3+RlP//gyoTY0G7V2DBieRlaTtXnwvwIDAQABo1MwUTAd
-BgNVHQ4EFgQU0mEGHQm3HZJaFkmxY9jG5N0ONVQwHwYDVR0jBBgwFoAU0mEGHQm3
-HZJaFkmxY9jG5N0ONVQwDwYDVR0TAQH/BAUwAwEB/zANBgkqhkiG9w0BAQsFAAOC
-AQEAFI8zmwR5fixFTCXJhQS/I5/vtEZcFljEEaWQZWyH/l5xVkSgkAW1F4+9YXJz
-bOc3WwEpJSaG8LcwBg+sYFKAG+TnQQYZmQE9y/pVQ7APUj2STM94TY3XshJUyDJi
-4d2Xc3zx11BHSJ00+0hVlj5u6oR08ybstKJu6fY8E7qmga3/8txjdlrcg4ElGPoc
-wsmXI1tjhPjyyz+zRiT/Eq8leoBfu3/WuQFAQ37kJTDr/eoPr2eNpLUB2ElZp0Vl
-1p8s8BVpL85w2eRRp80RtTU8qbZsmepddRlUQHjJljGq1qLAk0V75BmUoBDVNSs4
-ArT5VBB6wNCv0M1MU9JBZze+jQ==
 -----END CERTIFICATE-----
 )CRT";
